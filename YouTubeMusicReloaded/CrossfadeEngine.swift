@@ -1,4 +1,5 @@
 import AVFoundation
+import UIKit
 
 /// Crossfade curves (as in the desktop app): volume for progress 0…1.
 enum FadeCurve: String, CaseIterable, Identifiable {
@@ -55,6 +56,10 @@ final class CrossfadeEngine {
     private var handoverFrom: Date?
     /// Stop the incoming song by then even if the page never answers.
     private var handoverDeadline: Date?
+    /// Until the page says its player really plays again: keep the engine
+    /// (and the audio session) running, so iOS doesn't suspend the app in
+    /// the background between the two.
+    private var awaitingPage: Date?
     /// The one format both players are wired with: audio in another format
     /// is converted, as rewiring mid-fade makes the other song drop out.
     private let format: AVAudioFormat
@@ -64,9 +69,14 @@ final class CrossfadeEngine {
     private static let handoverRamp = 0.1
     /// Players start this long after they're told to, at a set moment.
     private static let startLead = 0.1
+    /// How fast a crossfade fades out when another song is picked mid-fade.
+    private static let abortFade = 1.0
     /// Found by ear: the page's player is heard this much later than its
     /// position says, so the native copy starts this much further in.
     private static let sync = 0.05
+    /// Extra for the leaving song (by ear: a tiny replay when the page
+    /// mutes means the native copy is still a little behind).
+    private static let outgoingSync = 0.03
 
     init(bridge: PlayerBridge) {
         self.bridge = bridge
@@ -108,6 +118,8 @@ final class CrossfadeEngine {
         case "in": startIncoming(id: id, json)
         case "unmuted": if id == fadeId, handoverDeadline != nil { handoverFrom = Date().addingTimeInterval(Self.handoverDelay) }
         case "cancel": if id == fadeId { fadeOutAlone() }
+        case "abort": if id == fadeId { abort(over: json["seconds"] as? Double ?? Self.abortFade) }
+        case "playing": if id == fadeId { awaitingPage = nil }
         default: break
         }
     }
@@ -179,9 +191,9 @@ final class CrossfadeEngine {
             // delay), from where the page will be at that moment.
             let lead = Self.startLead
             let when = AVAudioTime(hostTime: mach_absolute_time() + AVAudioTime.hostTime(forSeconds: lead))
-            let offset = self.offset(timing) + lead
+            let offset = self.offset(timing) + lead + Self.outgoingSync
             self.log("outgoing: \(Double(buffer.frameLength) / buffer.format.sampleRate)s from \(offset)")
-            self.log("latency \(Int(self.engine.outputNode.presentationLatency * 1000))ms, sync \(Int(Self.sync * 1000))ms, route \(AVAudioSession.sharedInstance().currentRoute.outputs.map(\.portType.rawValue))")
+            self.log("latency \(Int(self.engine.outputNode.presentationLatency * 1000))ms, sync \(Int((Self.sync + Self.outgoingSync) * 1000))ms, route \(AVAudioSession.sharedInstance().currentRoute.outputs.map(\.portType.rawValue))")
             guard self.play(buffer, on: self.outgoing, from: offset, volume: 1, at: when) else {
                 self.log("outgoing: play failed")
                 self.setMixing(false)
@@ -320,6 +332,8 @@ final class CrossfadeEngine {
                 fadeInFrom = nil
                 handoverDeadline = now.addingTimeInterval(1.5)
                 log("done, outgoing playing=\(outgoing.isPlaying) incoming playing=\(incoming.isPlaying)")
+                awaitingPage = now.addingTimeInterval(5)
+                log("app \(UIApplication.shared.applicationState == .background ? "in the background" : "active")")
                 bridge?.send("fadeDone", ["id": fadeId])
             }
         }
@@ -338,18 +352,56 @@ final class CrossfadeEngine {
             fadeOutFrom.map { now.timeIntervalSince($0) >= duration } ?? false
             || (outgoingEnds.map { now >= $0 } ?? false)
         if outgoingOver, outgoing.isPlaying { outgoing.stop() }
-        if outgoingOver, fadeInFrom == nil, handoverDeadline == nil, !incoming.isPlaying {
-            stopAll()
-            engine.stop()
-            // Let go of the session before it stops mixing: an active
-            // non-mixing session interrupts the page's player.
-            do {
-                try AVAudioSession.sharedInstance().setActive(false)
-            } catch {
-                log("deactivate: \(error)")
-            }
-            setMixing(false)
+        if let until = awaitingPage, now >= until { awaitingPage = nil }
+        if outgoingOver, fadeInFrom == nil, handoverDeadline == nil, awaitingPage == nil,
+            !incoming.isPlaying
+        {
+            finish()
         }
+    }
+
+    /// Both songs off, and the audio session back to normal.
+    private func finish() {
+        stopAll()
+        engine.stop()
+        // Let go of the session before it stops mixing: an active
+        // non-mixing session interrupts the page's player.
+        do {
+            try AVAudioSession.sharedInstance().setActive(false)
+        } catch {
+            log("deactivate: \(error)")
+        }
+        setMixing(false)
+    }
+
+    /// Another song was picked mid-fade (the newest pick wins): whatever is
+    /// playing fades out quickly, and the page plays the new song itself.
+    private func abort(over seconds: Double) {
+        log("abort \(fadeId)")
+        fadeId = 0  // Drops decodes still running for it.
+        fadeOutFrom = nil
+        fadeInFrom = nil
+        outgoingEnds = nil
+        handoverDeadline = nil
+        handoverFrom = nil
+        guard outgoing.isPlaying || incoming.isPlaying else {
+            finish()
+            return
+        }
+        let from = (outgoing: outgoing.volume, incoming: incoming.volume)
+        let began = Date()
+        timer?.invalidate()
+        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                let p = Float(min(1, Date().timeIntervalSince(began) / seconds))
+                self.outgoing.volume = from.outgoing * (1 - p)
+                self.incoming.volume = from.incoming * (1 - p)
+                if p >= 1 { self.finish() }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
     }
 
     /// The page's player plays in another process, which iOS treats like
@@ -357,6 +409,12 @@ final class CrossfadeEngine {
     /// (the pauses). Only during a fade: a mixing app gets no lock screen
     /// controls.
     private func setMixing(_ on: Bool) {
+        // Change it while inactive: changing an active session (as it is
+        // from launch, until the first fade ends) reroutes the audio, which
+        // makes the page's player drop out for a moment.
+        if on, !engine.isRunning {
+            try? AVAudioSession.sharedInstance().setActive(false)
+        }
         do {
             try AVAudioSession.sharedInstance().setCategory(
                 .playback, mode: .default, options: on ? [.mixWithOthers] : [])
@@ -376,6 +434,7 @@ final class CrossfadeEngine {
         outgoingEnds = nil
         handoverFrom = nil
         handoverDeadline = nil
+        awaitingPage = nil
         for file in [outgoingFile, incomingFile].compactMap({ $0 }) {
             try? FileManager.default.removeItem(at: file)
         }

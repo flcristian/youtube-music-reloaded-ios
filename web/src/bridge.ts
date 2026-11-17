@@ -11,6 +11,34 @@ import { tap } from './tap';
 
 // Before YouTube Music creates its player.
 tap.install();
+
+/**
+ * Lock screen buttons: previous / next (through the crossfade) instead of
+ * WebKit's −10 s / +10 s. The page's own handlers for these are ignored.
+ */
+const lockScreenButtons = () => {
+  const session = navigator.mediaSession;
+  if (!session) return;
+  const set = MediaSession.prototype.setActionHandler;
+  const ours: Partial<Record<MediaSessionAction, MediaSessionActionHandler | null>> = {
+    previoustrack: () => methods.previous({}),
+    nexttrack: () => methods.next({}),
+    play: () => methods.resume({}),
+    pause: () => methods.pause({}),
+    seekbackward: null,
+    seekforward: null,
+  };
+  MediaSession.prototype.setActionHandler = function (action, handler) {
+    set.call(this, action, action in ours ? (ours[action] ?? null) : handler);
+  };
+  for (const [action, handler] of Object.entries(ours)) {
+    try {
+      set.call(session, action as MediaSessionAction, handler ?? null);
+    } catch {
+      // Not supported here.
+    }
+  }
+};
 crossfade.partEnd = () => parts.current()?.end;
 import { arrangeSearch } from './search';
 
@@ -141,7 +169,8 @@ const state = () => {
     cover: data?.video_id ? currentCover() : undefined,
     position: player?.getCurrentTime() ?? 0,
     duration: player?.getDuration() ?? 0,
-    paused: media?.paused ?? true,
+    // Mid-fade the app plays the sound while the player switches songs.
+    paused: (media?.paused ?? true) && !crossfade.busy,
     part: parts.current(),
     task: parts.task,
   };
@@ -290,6 +319,7 @@ const methods: Record<string, (params: Params) => unknown> = {
   /** The crossfade is over. */
   fadeDone: (params) => crossfade.done(num(params, 'id')),
   pause: () => {
+    crossfade.pauseRequested();
     api()?.pauseVideo();
     return true;
   },
@@ -352,3 +382,5 @@ setInterval(() => send(), 1000);
     }
   },
 };
+
+lockScreenButtons();

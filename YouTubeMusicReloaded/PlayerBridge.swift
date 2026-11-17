@@ -1,3 +1,4 @@
+import UIKit
 import AVFoundation
 import WebKit
 
@@ -44,7 +45,10 @@ final class PlayerBridge: NSObject, ObservableObject {
         send(
             "crossfadeConfig",
             [
-                "enabled": defaults.bool(forKey: SettingsKey.crossfadeEnabled),
+                // Not in the background: there the player can't get its
+                // sound back after being muted (it plays on, silent).
+                "enabled": defaults.bool(forKey: SettingsKey.crossfadeEnabled)
+                    && UIApplication.shared.applicationState != .background,
                 "autoEnabled": defaults.object(forKey: SettingsKey.crossfadeAuto) as? Bool ?? true,
                 "autoDuration": number(SettingsKey.crossfadeAutoDuration, 5),
                 "manualEnabled": defaults.object(forKey: SettingsKey.crossfadeManual) as? Bool
@@ -76,6 +80,20 @@ final class PlayerBridge: NSObject, ObservableObject {
             WeakMessageHandler(self), name: "ytmrState")
         configuration.userContentController.add(
             WeakMessageHandler(self), name: "ytmrFade")
+        // Set up the crossfade's audio now, before anything plays: creating
+        // it sets up the audio output, which makes the player drop out for
+        // a moment if it's playing (the first skip used to pause).
+        _ = crossfade
+        for name in [
+            UIApplication.didEnterBackgroundNotification,
+            UIApplication.willEnterForegroundNotification,
+        ] {
+            NotificationCenter.default.addObserver(
+                forName: name, object: nil, queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in self?.applyCrossfadeSettings() }
+            }
+        }
         webView.uiDelegate = self
         webView.navigationDelegate = self
         webView.load(URLRequest(url: Self.home))

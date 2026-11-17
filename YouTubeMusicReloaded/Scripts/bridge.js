@@ -711,12 +711,67 @@
     /** A crossfade in progress. */
     fade;
     ids = 0;
+    /** Picks mid-fade so far (only the newest one unmutes). */
+    aborts = 0;
+    /** Waiting for a song picked mid-fade to play, to unmute. */
+    unmuting = false;
+    /** Run `action` (still muted) and unmute once its song plays. */
+    unmuteOnNext(action) {
+      const playing = api()?.getVideoData()?.video_id;
+      action();
+      const token = ++this.aborts;
+      this.unmuting = true;
+      const until = performance.now() + 5e3;
+      const check = () => {
+        if (token !== this.aborts) return;
+        const media = video();
+        const now = api()?.getVideoData()?.video_id;
+        const ready = media && !media.paused && now && now !== playing;
+        if (ready || performance.now() > until) {
+          this.unmuting = false;
+          setMuted(false);
+        } else setTimeout(check, 50);
+      };
+      check();
+    }
     /** Song (and start) the automatic crossfade already ran for. */
     autoDoneFor;
     /** Where the playing song (or its chosen part) ends. */
     partEnd = () => void 0;
     constructor() {
       document.addEventListener("timeupdate", this.onTimeUpdate, true);
+      document.addEventListener("pause", this.onPause, true);
+    }
+    /**
+     * Paused mid-fade (app, lock screen, headphones, a call…): the app stops
+     * its songs too, and the player gets its sound back for when it resumes.
+     * The player also pauses while it switches songs, so only a pause that
+     * lasts counts.
+     */
+    onPause = (event) => {
+      if (!(event.target instanceof HTMLMediaElement)) return;
+      if (!this.fade && !this.unmuting) return;
+      setTimeout(() => {
+        const media = video();
+        const state2 = api()?.getPlayerState?.();
+        if (!media?.paused || state2 !== 2) return;
+        this.pauseRequested();
+      }, 250);
+    };
+    /**
+     * Pause (from the app, the lock screen or headphones): mid-fade, the
+     * app's songs stop too and the crossfade is dropped (the player stays on
+     * the song it has), and the player gets its sound back for resuming.
+     */
+    pauseRequested() {
+      if (!this.fade && !this.unmuting) return;
+      const fade = this.fade;
+      log(`paused mid-fade (fade ${fade?.id ?? "-"})`);
+      this.fade = void 0;
+      this.aborts++;
+      this.unmuting = false;
+      if (fade) post({ phase: "abort", id: fade.id, seconds: 0.15 });
+      setMuted(false);
     }
     get busy() {
       return this.fade !== void 0;
@@ -728,8 +783,18 @@
     leave(action, kind, end) {
       const config = this.config;
       const on = config.enabled && (kind === "auto" ? config.autoEnabled : config.manualEnabled);
+      if (this.fade || this.unmuting) {
+        const old = this.fade;
+        this.fade = void 0;
+        if (old) {
+          log(`abort ${old.id}`);
+          post({ phase: "abort", id: old.id });
+        }
+        this.unmuteOnNext(action);
+        return;
+      }
       const media = video();
-      if (!on || this.fade || !media || media.paused) {
+      if (!on || !media || media.paused) {
         action();
         return;
       }
@@ -789,7 +854,34 @@
           setMuted(false);
         }
       }, 500);
+      this.confirmPlaying(id);
       return true;
+    }
+    /**
+     * Tell the app once the player really plays again (in the background,
+     * iOS may have stopped it while it was muted): the app keeps its audio
+     * going until then, so iOS doesn't suspend the app in between.
+     */
+    confirmPlaying(id) {
+      const media = video();
+      const from = media?.currentTime ?? 0;
+      const until = performance.now() + 4e3;
+      const check = () => {
+        if (this.fade) return;
+        const now = video();
+        if (now && !now.paused && now.currentTime > from + 0.2) {
+          log(`playing again at ${now.currentTime.toFixed(2)}, hidden=${document.hidden}`);
+          post({ phase: "playing", id });
+          return;
+        }
+        if (now?.paused || performance.now() > until) {
+          log(`not playing after the fade: paused=${now?.paused} t=${now?.currentTime.toFixed(2)}`);
+          post({ phase: "playing", id });
+          return;
+        }
+        setTimeout(check, 100);
+      };
+      setTimeout(check, 100);
     }
     /** Give up: the player plays (unmuted) and the app fades out alone. */
     cancel() {
@@ -1370,6 +1462,28 @@
 
   // src/bridge.ts
   tap.install();
+  var lockScreenButtons = () => {
+    const session = navigator.mediaSession;
+    if (!session) return;
+    const set = MediaSession.prototype.setActionHandler;
+    const ours = {
+      previoustrack: () => methods.previous({}),
+      nexttrack: () => methods.next({}),
+      play: () => methods.resume({}),
+      pause: () => methods.pause({}),
+      seekbackward: null,
+      seekforward: null
+    };
+    MediaSession.prototype.setActionHandler = function(action, handler2) {
+      set.call(this, action, action in ours ? ours[action] ?? null : handler2);
+    };
+    for (const [action, handler2] of Object.entries(ours)) {
+      try {
+        set.call(session, action, handler2 ?? null);
+      } catch {
+      }
+    }
+  };
   crossfade.partEnd = () => parts.current()?.end;
   var api3 = () => document.getElementById("movie_player");
   var video2 = () => document.querySelector("video");
@@ -1444,7 +1558,8 @@
       cover: data?.video_id ? currentCover() : void 0,
       position: player?.getCurrentTime() ?? 0,
       duration: player?.getDuration() ?? 0,
-      paused: media?.paused ?? true,
+      // Mid-fade the app plays the sound while the player switches songs.
+      paused: (media?.paused ?? true) && !crossfade.busy,
       part: parts.current(),
       task: parts.task
     };
@@ -1572,6 +1687,7 @@
     /** The crossfade is over. */
     fadeDone: (params) => crossfade.done(num(params, "id")),
     pause: () => {
+      crossfade.pauseRequested();
       api3()?.pauseVideo();
       return true;
     },
@@ -1622,4 +1738,5 @@
       }
     }
   };
+  lockScreenButtons();
 })();

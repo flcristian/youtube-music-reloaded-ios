@@ -22,6 +22,9 @@ interface PlayerApi {
   getCurrentTime(): number;
   getDuration(): number;
   mute?(): void;
+  /** 1: playing, 2: paused, 3: buffering, -1: not started. */
+  getPlayerState?(): number;
+  playVideo?(): void;
   unMute?(): void;
 }
 
@@ -80,6 +83,30 @@ class Crossfade {
     started: boolean;
   };
   private ids = 0;
+  /** Picks mid-fade so far (only the newest one unmutes). */
+  private aborts = 0;
+  /** Waiting for a song picked mid-fade to play, to unmute. */
+  private unmuting = false;
+
+  /** Run `action` (still muted) and unmute once its song plays. */
+  private unmuteOnNext(action: () => void) {
+    const playing = api()?.getVideoData()?.video_id;
+    action();
+    const token = ++this.aborts;
+    this.unmuting = true;
+    const until = performance.now() + 5000;
+    const check = () => {
+      if (token !== this.aborts) return;
+      const media = video();
+      const now = api()?.getVideoData()?.video_id;
+      const ready = media && !media.paused && now && now !== playing;
+      if (ready || performance.now() > until) {
+        this.unmuting = false;
+        setMuted(false);
+      } else setTimeout(check, 50);
+    };
+    check();
+  }
   /** Song (and start) the automatic crossfade already ran for. */
   private autoDoneFor?: string;
 
@@ -88,6 +115,40 @@ class Crossfade {
 
   constructor() {
     document.addEventListener('timeupdate', this.onTimeUpdate, true);
+    document.addEventListener('pause', this.onPause, true);
+  }
+
+  /**
+   * Paused mid-fade (app, lock screen, headphones, a call…): the app stops
+   * its songs too, and the player gets its sound back for when it resumes.
+   * The player also pauses while it switches songs, so only a pause that
+   * lasts counts.
+   */
+  private readonly onPause = (event: Event) => {
+    if (!(event.target instanceof HTMLMediaElement)) return;
+    if (!this.fade && !this.unmuting) return;
+    setTimeout(() => {
+      const media = video();
+      const state = api()?.getPlayerState?.();
+      if (!media?.paused || state !== 2) return;
+      this.pauseRequested();
+    }, 250);
+  };
+
+  /**
+   * Pause (from the app, the lock screen or headphones): mid-fade, the
+   * app's songs stop too and the crossfade is dropped (the player stays on
+   * the song it has), and the player gets its sound back for resuming.
+   */
+  pauseRequested() {
+    if (!this.fade && !this.unmuting) return;
+    const fade = this.fade;
+    log(`paused mid-fade (fade ${fade?.id ?? '-'})`);
+    this.fade = undefined;
+    this.aborts++;
+    this.unmuting = false;
+    if (fade) post({ phase: 'abort', id: fade.id, seconds: 0.15 });
+    setMuted(false);
   }
 
   get busy() {
@@ -103,8 +164,21 @@ class Crossfade {
     const on =
       config.enabled &&
       (kind === 'auto' ? config.autoEnabled : config.manualEnabled);
+    // Another song picked mid-fade (or while waiting for one picked
+    // mid-fade): the newest pick wins. The app fades out what it plays,
+    // and the player plays the new song itself.
+    if (this.fade || this.unmuting) {
+      const old = this.fade;
+      this.fade = undefined;
+      if (old) {
+        log(`abort ${old.id}`);
+        post({ phase: 'abort', id: old.id });
+      }
+      this.unmuteOnNext(action);
+      return;
+    }
     const media = video();
-    if (!on || this.fade || !media || media.paused) {
+    if (!on || !media || media.paused) {
       action();
       return;
     }
@@ -168,7 +242,36 @@ class Crossfade {
         setMuted(false);
       }
     }, 500);
+    this.confirmPlaying(id);
     return true;
+  }
+
+  /**
+   * Tell the app once the player really plays again (in the background,
+   * iOS may have stopped it while it was muted): the app keeps its audio
+   * going until then, so iOS doesn't suspend the app in between.
+   */
+  private confirmPlaying(id: number) {
+    const media = video();
+    const from = media?.currentTime ?? 0;
+    const until = performance.now() + 4000;
+    const check = () => {
+      if (this.fade) return;
+      const now = video();
+      if (now && !now.paused && now.currentTime > from + 0.2) {
+        log(`playing again at ${now.currentTime.toFixed(2)}, hidden=${document.hidden}`);
+        post({ phase: 'playing', id });
+        return;
+      }
+      // Paused (by the user): nothing to wait for.
+      if (now?.paused || performance.now() > until) {
+        log(`not playing after the fade: paused=${now?.paused} t=${now?.currentTime.toFixed(2)}`);
+        post({ phase: 'playing', id });
+        return;
+      }
+      setTimeout(check, 100);
+    };
+    setTimeout(check, 100);
   }
 
   /** Give up: the player plays (unmuted) and the app fades out alone. */
