@@ -3,6 +3,7 @@ import SwiftUI
 @main
 struct YouTubeMusicReloadedApp: App {
     @StateObject private var bridge = PlayerBridge()
+    @StateObject private var ui = AppUI()
     @State private var nowPlaying: NowPlaying?
 
     init() {
@@ -13,6 +14,7 @@ struct YouTubeMusicReloadedApp: App {
         WindowGroup {
             RootView()
                 .environmentObject(bridge)
+                .environmentObject(ui)
                 .preferredColorScheme(.dark)
                 .tint(Theme.primaryText)
                 .onAppear {

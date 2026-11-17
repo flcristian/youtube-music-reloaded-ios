@@ -130,6 +130,8 @@ struct ChipRow: View {
 /// Cover, title and Play / Shuffle of a playlist, album or artist page.
 struct HeaderView: View {
     @EnvironmentObject private var bridge: PlayerBridge
+    @AppStorage(SettingsKey.bestPartLength) private var bestPartLength =
+        SettingsDefault.bestPartLength
     let header: PageHeader
 
     var body: some View {
@@ -169,6 +171,27 @@ struct HeaderView: View {
                             .padding(.horizontal, 22)
                             .frame(height: 38)
                             .background(Theme.field, in: Capsule())
+                    }
+                }
+                if !header.round, let playlistId = header.playlistId {
+                    Menu {
+                        Button {
+                            bridge.playBestParts(
+                                playlistId, shuffle: false, partLength: bestPartLength)
+                        } label: {
+                            Label("Play best parts", systemImage: "sparkles")
+                        }
+                        Button {
+                            bridge.playBestParts(
+                                playlistId, shuffle: true, partLength: bestPartLength)
+                        } label: {
+                            Label("Shuffle best parts", systemImage: "shuffle")
+                        }
+                    } label: {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 16, weight: .semibold))
+                            .frame(width: 38, height: 38)
+                            .background(Theme.field, in: Circle())
                     }
                 }
             }
@@ -261,7 +284,16 @@ struct SectionView: View {
 
 /// Plays or opens an item, the way tapping it in YouTube Music does.
 @MainActor
-private func activate(_ item: Item, bridge: PlayerBridge, open: (String) -> Void) {
+private func activate(
+    _ item: Item, bridge: PlayerBridge, ui: AppUI, open: (String) -> Void
+) {
+    // "Choose a part before playing": songs open Play from… instead.
+    if item.playsOnTap, let target = item.playFromTarget,
+        UserDefaults.standard.bool(forKey: SettingsKey.askOnPlay)
+    {
+        ui.playFrom = target
+        return
+    }
     if item.playsOnTap, let play = item.play {
         bridge.playEndpoint(play)
     } else if let endpoint = item.open {
@@ -274,6 +306,7 @@ private func activate(_ item: Item, bridge: PlayerBridge, open: (String) -> Void
 /// A row: cover, title, details, length and the ⋮ menu.
 struct ItemRow: View {
     @EnvironmentObject private var bridge: PlayerBridge
+    @EnvironmentObject private var ui: AppUI
     let item: Item
     var fallbackCover: String?
     let open: (String) -> Void
@@ -310,13 +343,14 @@ struct ItemRow: View {
         .padding(.trailing, 4)
         .padding(.vertical, 6)
         .contentShape(Rectangle())
-        .onTapGesture { activate(item, bridge: bridge, open: open) }
+        .onTapGesture { activate(item, bridge: bridge, ui: ui, open: open) }
     }
 }
 
 /// ⋮ — Play next / Add to queue for songs, Play for albums and playlists.
 struct ItemMenu: View {
     @EnvironmentObject private var bridge: PlayerBridge
+    @EnvironmentObject private var ui: AppUI
     let item: Item
     let open: (String) -> Void
 
@@ -328,6 +362,11 @@ struct ItemMenu: View {
                 }
                 Button { bridge.enqueue(videoId, .end) } label: {
                     Label("Add to queue", systemImage: "text.badge.plus")
+                }
+                if let target = item.playFromTarget {
+                    Button { ui.playFrom = target } label: {
+                        Label("Play from…", systemImage: "play.square")
+                    }
                 }
             } else if let play = item.play {
                 Button { bridge.playEndpoint(play) } label: {
@@ -352,6 +391,7 @@ struct ItemMenu: View {
 /// A card: cover (round for artists) with title and details below.
 struct ItemCard: View {
     @EnvironmentObject private var bridge: PlayerBridge
+    @EnvironmentObject private var ui: AppUI
     let item: Item
     /// Fixed width in carousels; fills its grid column when nil.
     let width: CGFloat?
@@ -381,7 +421,7 @@ struct ItemCard: View {
         .frame(width: width)
         .frame(maxWidth: width == nil ? .infinity : nil, alignment: .leading)
         .contentShape(Rectangle())
-        .onTapGesture { activate(item, bridge: bridge, open: open) }
+        .onTapGesture { activate(item, bridge: bridge, ui: ui, open: open) }
         .contextMenu {
             if let videoId = item.videoId {
                 Button { bridge.enqueue(videoId, .next) } label: {
@@ -389,6 +429,11 @@ struct ItemCard: View {
                 }
                 Button { bridge.enqueue(videoId, .end) } label: {
                     Label("Add to queue", systemImage: "text.badge.plus")
+                }
+                if let target = item.playFromTarget {
+                    Button { ui.playFrom = target } label: {
+                        Label("Play from…", systemImage: "play.square")
+                    }
                 }
             } else if let play = item.play {
                 Button { bridge.playEndpoint(play) } label: {

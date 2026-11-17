@@ -5,6 +5,7 @@
  */
 import { innertube, thumbnailOf } from './innertube';
 import { parsePage } from './pages';
+import { bestPart, parts, songDetails, type Interval } from './parts';
 import { arrangeSearch } from './search';
 
 declare const ytcfg: { get: (key: string) => unknown };
@@ -135,8 +136,16 @@ const state = () => {
     position: player?.getCurrentTime() ?? 0,
     duration: player?.getDuration() ?? 0,
     paused: media?.paused ?? true,
+    part: parts.current(),
+    task: parts.task,
   };
 };
+
+/** `start` / `end` params (seconds; no `end`: until the song's end). */
+const interval = (params: Params): Interval => ({
+  start: typeof params.start === 'number' ? params.start : 0,
+  end: typeof params.end === 'number' ? params.end : undefined,
+});
 
 const methods: Record<string, (params: Params) => unknown> = {
   state,
@@ -212,31 +221,44 @@ const methods: Record<string, (params: Params) => unknown> = {
     return true;
   },
 
-  /** "Play next" / "Add to queue", with YouTube Music's own action. */
+  /** "Play next" / "Add to queue" (optionally only a part of the song). */
   enqueue: (params) => {
+    parts.enqueue(
+      str(params, 'videoId'),
+      interval(params),
+      params.position === 'end' ? 'INSERT_AT_END' : 'INSERT_AFTER_CURRENT_VIDEO',
+    );
+    return true;
+  },
+
+  /** Play part of a song now. */
+  playPart: (params) => {
+    parts.play(str(params, 'videoId'), interval(params));
+    return true;
+  },
+
+  /** Length, title, cover and best `part`-second window of a song. */
+  songInfo: async (params) => {
     const videoId = str(params, 'videoId');
-    const position =
-      params.position === 'end'
-        ? 'INSERT_AT_END'
-        : 'INSERT_AFTER_CURRENT_VIDEO';
-    const item = document.createElement(
-      'ytmusic-menu-service-item-renderer',
-    ) as HTMLElement & { data?: unknown; onTap?: () => void };
-    item.hidden = true;
-    document.body.append(item);
-    item.data = {
-      serviceEndpoint: {
-        queueAddEndpoint: {
-          queueTarget: { videoId, onEmptyQueue: { watchEndpoint: { videoId } } },
-          queueInsertPosition: position,
-        },
-      },
-    };
-    try {
-      item.onTap?.();
-    } finally {
-      setTimeout(() => item.remove(), 1000);
-    }
+    const details = await songDetails(videoId);
+    const best = await bestPart(videoId, details.length, num(params, 'part'));
+    return { ...details, best };
+  },
+
+  /** "Play best parts" / "Shuffle best parts" of a playlist or album. */
+  bestParts: (params) => {
+    parts
+      .playBestParts(
+        str(params, 'playlistId'),
+        params.shuffle === true,
+        num(params, 'part'),
+      )
+      .catch((err: unknown) => {
+        parts.task = err instanceof Error ? err.message : String(err);
+        setTimeout(() => {
+          parts.task = undefined;
+        }, 4000);
+      });
     return true;
   },
 

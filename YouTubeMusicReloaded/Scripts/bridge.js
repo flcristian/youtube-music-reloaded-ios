@@ -51,14 +51,55 @@
     }
     return out;
   };
+  var text = (value) => {
+    const node = value;
+    return node?.runs?.map((run) => run.text ?? "").join("") ?? node?.simpleText ?? "";
+  };
   var thumbnailOf = (node) => {
     const list = findAll(node, "thumbnails")[0];
     return list?.[0]?.url;
   };
+  var DURATION = /^\d+:\d{2}(:\d{2})?$/;
+  var parseTracks = (json) => {
+    const tracks = [];
+    for (const raw of findAll(json, "musicResponsiveListItemRenderer")) {
+      const item = raw;
+      const columns = (item.flexColumns ?? []).map(
+        (column) => text(
+          column.musicResponsiveListItemFlexColumnRenderer?.text
+        )
+      );
+      const watch = findAll(
+        [item.playlistItemData, item.flexColumns, item.overlay],
+        "videoId"
+      );
+      const videoId = watch.find((id) => typeof id === "string");
+      if (!videoId) continue;
+      const fixed = text(
+        item.fixedColumns?.[0]?.musicResponsiveListItemFixedColumnRenderer?.text
+      );
+      const parts2 = columns.slice(1).filter(Boolean).join(" \u2022 ");
+      const duration = fixed || parts2.split(" \u2022 ").map((part) => part.trim()).find((part) => DURATION.test(part));
+      tracks.push({
+        videoId,
+        title: columns[0] ?? "",
+        subtitle: parts2,
+        duration: duration || void 0,
+        thumbnail: thumbnailOf(item.thumbnail)
+      });
+    }
+    return tracks;
+  };
+  var parseContinuation = (json) => {
+    const command = findAll(json, "continuationCommand")[0];
+    if (command?.token) return command.token;
+    const next = findAll(json, "nextContinuationData")[0];
+    return next?.continuation;
+  };
 
   // src/pages.ts
   var SHUFFLE_PARAMS = "wAEB8gECKAE%3D";
-  var text = (value) => {
+  var text2 = (value) => {
     const node = value;
     return node?.runs?.map((run) => run.text ?? "").join("") ?? node?.simpleText ?? "";
   };
@@ -118,23 +159,23 @@
   };
   var playEndpoint = (node) => endpoint(node, "watchEndpoint", "watchPlaylistEndpoint");
   var openEndpoint = (node) => endpoint(node, "browseEndpoint", "searchEndpoint");
-  var DURATION = /^\d+:\d{2}(:\d{2})?$/;
+  var DURATION2 = /^\d+:\d{2}(:\d{2})?$/;
   var listItem = (item) => {
     const columns = (item.flexColumns ?? []).map(
       (column) => get(column, "musicResponsiveListItemFlexColumnRenderer", "text")
     );
-    const title = text(columns[0]);
-    const details = columns.slice(1).map(text).filter(Boolean).join(" \u2022 ");
-    const fixed = text(
+    const title = text2(columns[0]);
+    const details = columns.slice(1).map(text2).filter(Boolean).join(" \u2022 ");
+    const fixed = text2(
       get(
         item.fixedColumns?.[0],
         "musicResponsiveListItemFixedColumnRenderer",
         "text"
       )
     );
-    const parts = details.split(" \u2022 ").map((part) => part.trim());
-    const duration = fixed || parts.find((part) => DURATION.test(part));
-    const subtitle = parts.filter((part) => part && part !== duration).join(" \u2022 ");
+    const parts2 = details.split(" \u2022 ").map((part) => part.trim());
+    const duration = fixed || parts2.find((part) => DURATION2.test(part));
+    const subtitle = parts2.filter((part) => part && part !== duration).join(" \u2022 ");
     const overlayPlay = get(
       item.overlay,
       "musicItemThumbnailOverlayRenderer",
@@ -182,7 +223,7 @@
       "musicPlayButtonRenderer",
       "playNavigationEndpoint"
     );
-    const title = text(item.title);
+    const title = text2(item.title);
     if (!title) return void 0;
     const wide = item.aspectRatio === "MUSIC_TWO_ROW_ITEM_THUMBNAIL_ASPECT_RATIO_RECTANGLE_16_9";
     const watch = get(navigation, "watchEndpoint");
@@ -190,7 +231,7 @@
       return {
         kind: watchKind(navigation),
         title,
-        subtitle: text(item.subtitle),
+        subtitle: text2(item.subtitle),
         thumbnail: thumbnail(item.thumbnailRenderer, 226),
         wide,
         videoId: typeof watch.videoId === "string" ? watch.videoId : void 0,
@@ -203,7 +244,7 @@
     return {
       kind: pageKind(navigation),
       title,
-      subtitle: text(item.subtitle),
+      subtitle: text2(item.subtitle),
       thumbnail: thumbnail(item.thumbnailRenderer, 226),
       wide,
       open,
@@ -212,7 +253,7 @@
   };
   var navigationButton = (item) => {
     const open = openEndpoint(item.clickCommand);
-    const title = text(item.buttonText);
+    const title = text2(item.buttonText);
     if (!open || !title) return void 0;
     return { kind: "page", title, subtitle: "", wide: false, open };
   };
@@ -241,8 +282,8 @@
     const navigation = card.onTap ?? get(card, "title", "runs", "0", "navigationEndpoint");
     const main = {
       kind: get(navigation, "watchEndpoint") ? watchKind(navigation) : pageKind(navigation),
-      title: text(card.title),
-      subtitle: text(card.subtitle),
+      title: text2(card.title),
+      subtitle: text2(card.subtitle),
       thumbnail: thumbnail(card.thumbnail, 226),
       wide: false,
       play: playEndpoint(navigation),
@@ -250,7 +291,7 @@
       videoId: get(navigation, "watchEndpoint", "videoId")
     };
     return {
-      title: text(get(card, "header", "musicCardShelfHeaderBasicRenderer", "title")),
+      title: text2(get(card, "header", "musicCardShelfHeaderBasicRenderer", "title")),
       style: "list",
       items: [main, ...items(card.contents)].filter((it) => it.title)
     };
@@ -266,7 +307,7 @@
     switch (key) {
       case "musicCarouselShelfRenderer": {
         const list = items(node.contents);
-        const title = text(
+        const title = text2(
           get(node, "header", "musicCarouselShelfBasicHeaderRenderer", "title")
         );
         const rows = list.every((it) => it.videoId && !it.wide) && node.contents?.[0]?.musicResponsiveListItemRenderer;
@@ -275,14 +316,14 @@
       case "musicShelfRenderer":
       case "musicPlaylistShelfRenderer":
         return {
-          title: text(node.title) || void 0,
+          title: text2(node.title) || void 0,
           style: "list",
           items: items(node.contents),
           more: moreEndpoint(node)
         };
       case "gridRenderer":
         return {
-          title: text(get(node, "header", "gridHeaderRenderer", "title")) || void 0,
+          title: text2(get(node, "header", "gridHeaderRenderer", "title")) || void 0,
           style: "grid",
           items: items(node.items)
         };
@@ -310,10 +351,10 @@
         watchPlaylistEndpoint: { playlistId: listId, params: SHUFFLE_PARAMS }
       }) : void 0;
       return {
-        title: text(node.title),
-        subtitle: text(node.subtitle),
-        secondSubtitle: text(node.secondSubtitle),
-        strapline: text(node.straplineTextOne) || void 0,
+        title: text2(node.title),
+        subtitle: text2(node.subtitle),
+        secondSubtitle: text2(node.secondSubtitle),
+        strapline: text2(node.straplineTextOne) || void 0,
         thumbnail: thumbnail(node.thumbnail ?? node.foregroundThumbnail, 400),
         round: artist,
         play,
@@ -343,7 +384,7 @@
   };
   var chip = (node) => {
     const open = openEndpoint(node.navigationEndpoint);
-    const title = text(node.text);
+    const title = text2(node.text);
     if (!open || !title) return void 0;
     return { title, selected: node.isSelected === true, open };
   };
@@ -380,6 +421,441 @@
     page.continuation = continuation(json);
     return page;
   };
+
+  // src/best-part.ts
+  var INTRO = 15;
+  var STEP = 5;
+  var OUTRO = 4;
+  var graphs = /* @__PURE__ */ new Map();
+  var fetchGraph = async (videoId) => {
+    const response = await fetch(
+      "https://www.youtube.com/youtubei/v1/next?prettyPrint=false",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          context: {
+            client: {
+              clientName: "WEB",
+              clientVersion: "2.20251101.00.00",
+              hl: "en"
+            }
+          },
+          videoId
+        })
+      }
+    );
+    if (!response.ok) return void 0;
+    let markers = [];
+    const walk = (node) => {
+      if (Array.isArray(node)) {
+        for (const item of node) walk(item);
+      } else if (node && typeof node === "object") {
+        for (const [key, value] of Object.entries(node)) {
+          const list = value?.markersList;
+          if (key === "macroMarkersListEntity" && list?.markerType === "MARKER_TYPE_HEATMAP") {
+            markers = list.markers ?? [];
+          } else {
+            walk(value);
+          }
+        }
+      }
+    };
+    walk(await response.json());
+    return markers.length ? markers.map((marker) => ({
+      at: Number(marker.startMillis) / 1e3,
+      value: marker.intensityScoreNormalized ?? 0
+    })) : void 0;
+  };
+  var loadReplayGraph = (videoId) => {
+    let graph = graphs.get(videoId);
+    if (!graph) {
+      graph = fetchGraph(videoId).catch(() => void 0);
+      graphs.set(videoId, graph);
+    }
+    return graph;
+  };
+  var bestPartStart = (graph, length, seconds2) => {
+    if (seconds2 >= length - INTRO - OUTRO) return 0;
+    const body = graph.filter((point) => point.at >= INTRO);
+    if (body.length < 2) return 0;
+    const meanAt = body.reduce((sum, point) => sum + point.at, 0) / body.length;
+    const meanValue = body.reduce((sum, point) => sum + point.value, 0) / body.length;
+    let covariance = 0;
+    let spread = 0;
+    for (const point of body) {
+      const offset = point.at - meanAt;
+      covariance += offset * (point.value - meanValue);
+      spread += offset * offset;
+    }
+    const slope = spread ? covariance / spread : 0;
+    const above = body.map((point) => {
+      const drift = slope * (point.at - meanAt);
+      const trend = meanValue + drift;
+      return { at: point.at, value: point.value - trend };
+    });
+    let best = INTRO;
+    let bestScore = -Infinity;
+    for (let start = INTRO; start + seconds2 <= length - OUTRO; start += STEP) {
+      const end = start + seconds2;
+      let score = 0;
+      for (const point of above) {
+        if (point.at >= start && point.at < end) score += point.value;
+      }
+      if (score > bestScore) {
+        bestScore = score;
+        best = start;
+      }
+    }
+    return best;
+  };
+
+  // src/parts.ts
+  var api = () => document.getElementById("movie_player");
+  var ENSURE_TIMEOUT = 1e4;
+  var SETTLE_TIME = 1e3;
+  var nearStart = (time, start) => time >= start - 1.5 && time <= start + 10;
+  var MAX_SONGS = 50;
+  var PARALLEL = 6;
+  var QUEUE_WAIT = 4e3;
+  var MAX_PAGES = 50;
+  var normalizeTitle = (title) => (title ?? "").normalize("NFD").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  var wait = (ms) => new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+  var waitFor = async (done, timeout) => {
+    const until = performance.now() + timeout;
+    while (performance.now() < until) {
+      if (done()) return true;
+      await wait(100);
+    }
+    return done();
+  };
+  var seconds = (duration) => {
+    if (!duration) return void 0;
+    let total = 0;
+    for (const part of duration.split(":")) total = total * 60 + Number(part);
+    return Number.isFinite(total) && total > 0 ? total : void 0;
+  };
+  var shuffled = (items2) => {
+    for (let i = items2.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [items2[i], items2[j]] = [items2[j], items2[i]];
+    }
+    return items2;
+  };
+  var queueEntries = () => [
+    ...document.querySelectorAll(
+      "ytmusic-player-queue-item"
+    )
+  ].map(
+    (item) => item.closest(
+      "ytmusic-playlist-panel-video-wrapper-renderer"
+    ) ?? item
+  );
+  var queueLength = () => document.querySelectorAll("ytmusic-player-queue-item").length;
+  var navigate = (endpoint2) => {
+    document.querySelector("ytmusic-app")?.dispatchEvent(
+      new CustomEvent("yt-navigate", {
+        bubbles: true,
+        composed: true,
+        detail: { endpoint: endpoint2 }
+      })
+    );
+  };
+  var songDetails = async (videoId) => {
+    const json = await innertube("player", { videoId });
+    const details = json.videoDetails ?? {};
+    const thumbnails = details.thumbnail?.thumbnails ?? [];
+    const largest = thumbnails.reduce(
+      (best, it) => !best || it.width > best.width ? it : best,
+      void 0
+    );
+    return {
+      title: details.title ?? "",
+      artist: details.author ?? "",
+      length: Number(details.lengthSeconds) || 0,
+      thumbnail: largest?.url
+    };
+  };
+  var bestPart = async (videoId, length, part) => {
+    const graph = await loadReplayGraph(videoId);
+    if (!graph || !length) return void 0;
+    const span = Math.min(part, length);
+    const start = bestPartStart(graph, length, span);
+    const end = start + span;
+    return { start, end: end >= length - 0.5 ? void 0 : end };
+  };
+  var runPart = async (track, part) => {
+    const length = seconds(track.duration);
+    if (!length || length <= part + 20) return { start: 0 };
+    const graph = await loadReplayGraph(track.videoId);
+    const start = graph ? bestPartStart(graph, length, part) : Math.max(15, Math.round(length * 0.45) - Math.round(part / 2));
+    return { start, end: Math.min(length, start + part) };
+  };
+  var playlistTracks = async (playlistId) => {
+    const tracks = [];
+    let json = await innertube("browse", {
+      browseId: `VL${playlistId.replace(/^VL/, "")}`
+    });
+    for (let page = 0; page < MAX_PAGES; page++) {
+      tracks.push(...parseTracks(json));
+      const next = parseContinuation(json);
+      if (!next) break;
+      json = await innertube("browse", { continuation: next });
+    }
+    return tracks;
+  };
+  var Parts = class {
+    /** Queued songs and the part of them to play. */
+    scheduled = /* @__PURE__ */ new Map();
+    /** Songs of a best-parts run that haven't played yet, and their titles. */
+    bestParts = /* @__PURE__ */ new Set();
+    bestPartTitles = /* @__PURE__ */ new Map();
+    /** Play now: the next song that starts is the chosen one. */
+    playNow;
+    /** The playing song's part, once it has started. */
+    active;
+    lastVideoId;
+    cancelEnsure;
+    /** Bumped by every best-parts run, so an older one stops. */
+    run = 0;
+    /** What a best-parts run is doing (for the app), if one is running. */
+    task;
+    constructor() {
+      for (const type of ["loadeddata", "playing", "timeupdate"]) {
+        document.addEventListener(type, this.onProgress, true);
+      }
+    }
+    /** The playing song's part, if one was chosen. */
+    current() {
+      const videoId = api()?.getVideoData()?.video_id;
+      const active = this.active;
+      return active && active.videoId === videoId ? { start: active.start, end: active.end } : void 0;
+    }
+    /** Play `interval` of `videoId` now. */
+    play(videoId, interval2) {
+      const player = api();
+      if (player?.getVideoData()?.video_id === videoId) {
+        this.active = { videoId, ...interval2 };
+        player.seekTo(interval2.start, true);
+        return;
+      }
+      this.playNow = { interval: interval2, key: videoId, at: performance.now() };
+      navigate({
+        watchEndpoint: { videoId, startTimeSeconds: Math.floor(interval2.start) }
+      });
+    }
+    /** "Play next" / "Add to queue", playing only `interval` when it's up. */
+    enqueue(videoId, interval2, position) {
+      const item = document.createElement(
+        "ytmusic-menu-service-item-renderer"
+      );
+      item.hidden = true;
+      document.body.append(item);
+      item.data = {
+        serviceEndpoint: {
+          queueAddEndpoint: {
+            queueTarget: { videoId, onEmptyQueue: { watchEndpoint: { videoId } } },
+            queueInsertPosition: position
+          }
+        }
+      };
+      try {
+        item.onTap?.();
+      } finally {
+        setTimeout(() => item.remove(), 1e3);
+      }
+      if (interval2.start >= 1 || interval2.end !== void 0) {
+        this.scheduled.set(videoId, interval2);
+      } else if (!this.bestParts.has(videoId)) {
+        this.scheduled.delete(videoId);
+      }
+    }
+    /** Play up to 50 songs of a playlist, each only for its best part. */
+    async playBestParts(playlistId, shuffle, part) {
+      const run = ++this.run;
+      const stale = () => run !== this.run;
+      this.task = "Loading songs\u2026";
+      try {
+        const all = await playlistTracks(playlistId);
+        if (stale()) return;
+        const unique = [
+          ...new Map(all.map((track) => [track.videoId, track])).values()
+        ];
+        const tracks = (shuffle ? shuffled(unique) : unique).slice(0, MAX_SONGS);
+        if (!tracks.length) throw new Error("This playlist is empty");
+        const parts2 = /* @__PURE__ */ new Map();
+        let done = 0;
+        this.task = `Finding best parts\u2026 0/${tracks.length}`;
+        const pending = [...tracks];
+        const worker = async () => {
+          for (let track = pending.shift(); track; track = pending.shift()) {
+            const interval2 = await runPart(track, part).catch(() => ({
+              start: 0
+            }));
+            parts2.set(track.videoId, interval2);
+            done++;
+            if (!stale()) {
+              this.task = `Finding best parts\u2026 ${done}/${tracks.length}`;
+            }
+          }
+        };
+        await Promise.all(Array.from({ length: PARALLEL }, worker));
+        if (stale()) return;
+        this.endBestParts();
+        for (const track of tracks) {
+          this.scheduled.set(track.videoId, parts2.get(track.videoId));
+          this.bestParts.add(track.videoId);
+          const title = normalizeTitle(track.title);
+          if (title) this.bestPartTitles.set(track.videoId, title);
+        }
+        const [first, ...rest] = tracks;
+        this.play(first.videoId, parts2.get(first.videoId));
+        await waitFor(
+          () => api()?.getVideoData()?.video_id === first.videoId,
+          15e3
+        );
+        await wait(1e3);
+        let queued = 0;
+        for (const track of [...rest].reverse()) {
+          if (stale()) return;
+          this.task = `Queueing\u2026 ${queued}/${rest.length}`;
+          const before = queueLength();
+          this.enqueue(
+            track.videoId,
+            parts2.get(track.videoId),
+            "INSERT_AFTER_CURRENT_VIDEO"
+          );
+          await waitFor(() => queueLength() > before, QUEUE_WAIT);
+          queued++;
+        }
+      } finally {
+        if (run === this.run) this.task = void 0;
+      }
+    }
+    endBestParts() {
+      for (const videoId of this.bestParts) this.scheduled.delete(videoId);
+      this.bestParts.clear();
+      this.bestPartTitles.clear();
+    }
+    /**
+     * The scheduled entry for the playing song. Songs can play under another
+     * id (song vs. music video version): also look at every id in the
+     * playing song's queue entry, then at best-parts titles.
+     */
+    findScheduled(videoId) {
+      const direct = this.scheduled.get(videoId);
+      if (direct) return { key: videoId, interval: direct };
+      if (!this.scheduled.size) return void 0;
+      const ids = /* @__PURE__ */ new Set();
+      for (const entry of queueEntries()) {
+        const json = JSON.stringify(entry.data ?? {});
+        if (!json.includes(`"${videoId}"`)) continue;
+        for (const match of json.matchAll(/"videoId":"([\w-]+)"/g)) {
+          ids.add(match[1]);
+        }
+      }
+      for (const [key, interval2] of this.scheduled) {
+        if (ids.has(key)) return { key, interval: interval2 };
+      }
+      const title = normalizeTitle(api()?.getVideoData()?.title);
+      if (title) {
+        for (const key of this.bestParts) {
+          const interval2 = this.scheduled.get(key);
+          if (interval2 && this.bestPartTitles.get(key) === title) {
+            return { key, interval: interval2 };
+          }
+        }
+      }
+      return void 0;
+    }
+    /** Whether a best-parts song that hasn't played yet is still queued. */
+    bestPartsQueued() {
+      const json = queueEntries().map((entry) => JSON.stringify(entry.data ?? {})).join();
+      return [...this.bestParts].some(
+        (videoId) => json.includes(`"${videoId}"`)
+      );
+    }
+    /** A song started: jump to its part. While it plays: stop at its end. */
+    onProgress = (event) => {
+      if (!(event.target instanceof HTMLMediaElement)) return;
+      const player = api();
+      const videoId = player?.getVideoData()?.video_id;
+      if (!player || !videoId) return;
+      if (videoId === this.lastVideoId) {
+        this.checkEnd(player, videoId, event.target);
+        return;
+      }
+      if (!(player.getDuration() > 0)) return;
+      this.lastVideoId = videoId;
+      let found;
+      const playNow = this.playNow;
+      this.playNow = void 0;
+      if (playNow && performance.now() - playNow.at < ENSURE_TIMEOUT) {
+        found = playNow;
+      } else {
+        found = this.findScheduled(videoId);
+      }
+      if (found) {
+        this.active = { videoId, ...found.interval };
+      } else if (this.active?.videoId !== videoId) {
+        this.active = void 0;
+      }
+      if (!found && this.bestParts.size && !this.bestPartsQueued()) {
+        this.endBestParts();
+      }
+      if (!found) return;
+      this.scheduled.delete(found.key);
+      this.bestParts.delete(found.key);
+      if (found.interval.start >= 1) {
+        this.ensurePosition(videoId, found.interval.start);
+      }
+    };
+    /** At the chosen end, move on to the next song. */
+    checkEnd(player, videoId, media) {
+      const end = this.active?.videoId === videoId ? this.active.end : void 0;
+      if (end === void 0 || media.paused) return;
+      const time = player.getCurrentTime();
+      if (time < end || time > end + 2) return;
+      this.active = void 0;
+      document.querySelector(".next-button")?.click();
+    }
+    /**
+     * Make the song actually play from `start`: YouTube Music sometimes
+     * ignores the start time, so keep checking until it stays there.
+     */
+    ensurePosition(videoId, start) {
+      this.cancelEnsure?.();
+      const started = performance.now();
+      let settledSince;
+      const timer = setInterval(() => {
+        const now = performance.now();
+        if (now - started > ENSURE_TIMEOUT) {
+          this.cancelEnsure?.();
+          return;
+        }
+        const player = api();
+        const media = document.querySelector("video");
+        const playing = media && !media.paused && media.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA;
+        if (!player || player.getVideoData()?.video_id !== videoId || !playing) {
+          return;
+        }
+        if (!nearStart(player.getCurrentTime(), start)) {
+          player.seekTo(start, true);
+          settledSince = void 0;
+        } else {
+          settledSince ??= now;
+          if (now - settledSince > SETTLE_TIME) this.cancelEnsure?.();
+        }
+      }, 50);
+      this.cancelEnsure = () => {
+        clearInterval(timer);
+        this.cancelEnsure = void 0;
+      };
+    }
+  };
+  var parts = new Parts();
 
   // src/search.ts
   var FILTERS = [
@@ -442,9 +918,9 @@
   };
 
   // src/bridge.ts
-  var api = () => document.getElementById("movie_player");
+  var api2 = () => document.getElementById("movie_player");
   var video = () => document.querySelector("video");
-  var text2 = (value) => {
+  var text3 = (value) => {
     const node = value;
     return node?.runs?.map((run) => run.text ?? "").join("") ?? node?.simpleText ?? "";
   };
@@ -463,7 +939,7 @@
     (item) => item.parentElement?.id !== "counterpart-renderer"
   );
   var isCurrent = (item) => {
-    const playing = api()?.getVideoData()?.video_id;
+    const playing = api2()?.getVideoData()?.video_id;
     const versions = [
       item,
       ...item.closest("ytmusic-playlist-panel-video-wrapper-renderer")?.querySelectorAll(
@@ -474,7 +950,7 @@
       (version) => version.hasAttribute("selected") && version.data?.videoId === playing
     );
   };
-  var navigate = (endpoint2) => {
+  var navigate2 = (endpoint2) => {
     document.querySelector("ytmusic-app")?.dispatchEvent(
       new CustomEvent("yt-navigate", {
         bubbles: true,
@@ -499,11 +975,11 @@
     );
     const src = img?.src;
     if (src && !src.startsWith("data:")) return large(src);
-    const id = api()?.getVideoData()?.video_id;
+    const id = api2()?.getVideoData()?.video_id;
     return id ? `https://i.ytimg.com/vi/${id}/hqdefault.jpg` : void 0;
   };
   var state = () => {
-    const player = api();
+    const player = api2();
     const data = player?.getVideoData();
     const media = video();
     return {
@@ -515,9 +991,15 @@
       cover: data?.video_id ? currentCover() : void 0,
       position: player?.getCurrentTime() ?? 0,
       duration: player?.getDuration() ?? 0,
-      paused: media?.paused ?? true
+      paused: media?.paused ?? true,
+      part: parts.current(),
+      task: parts.task
     };
   };
+  var interval = (params) => ({
+    start: typeof params.start === "number" ? params.start : 0,
+    end: typeof params.end === "number" ? params.end : void 0
+  });
   var methods = {
     state,
     /** Search results, as YouTube Music's search page shows them. */
@@ -555,20 +1037,20 @@
       if (!endpoint2.watchEndpoint && !endpoint2.watchPlaylistEndpoint) {
         throw new Error("Nothing to play");
       }
-      navigate(endpoint2);
+      navigate2(endpoint2);
       return true;
     },
     queue: () => queueItems().map((item) => ({
       videoId: item.data?.videoId ?? "",
-      title: text2(item.data?.title),
-      artist: text2(item.data?.shortBylineText),
-      duration: text2(item.data?.lengthText) || void 0,
+      title: text3(item.data?.title),
+      artist: text3(item.data?.shortBylineText),
+      duration: text3(item.data?.lengthText) || void 0,
       thumbnail: thumbnailOf(item.data?.thumbnail),
       current: isCurrent(item)
     })),
     /** Play a song now; YouTube Music fills the queue with its radio. */
     play: (params) => {
-      navigate({ watchEndpoint: { videoId: str(params, "videoId") } });
+      navigate2({ watchEndpoint: { videoId: str(params, "videoId") } });
       return true;
     },
     /** Jump to a song that's already in the queue. */
@@ -576,33 +1058,44 @@
       const item = queueItems()[num(params, "index")];
       const videoId = item?.data?.videoId;
       if (!item || !videoId) throw new Error("That song is no longer queued");
-      navigate({
+      navigate2({
         watchEndpoint: item.data?.navigationEndpoint?.watchEndpoint ?? { videoId }
       });
       return true;
     },
-    /** "Play next" / "Add to queue", with YouTube Music's own action. */
+    /** "Play next" / "Add to queue" (optionally only a part of the song). */
     enqueue: (params) => {
-      const videoId = str(params, "videoId");
-      const position = params.position === "end" ? "INSERT_AT_END" : "INSERT_AFTER_CURRENT_VIDEO";
-      const item = document.createElement(
-        "ytmusic-menu-service-item-renderer"
+      parts.enqueue(
+        str(params, "videoId"),
+        interval(params),
+        params.position === "end" ? "INSERT_AT_END" : "INSERT_AFTER_CURRENT_VIDEO"
       );
-      item.hidden = true;
-      document.body.append(item);
-      item.data = {
-        serviceEndpoint: {
-          queueAddEndpoint: {
-            queueTarget: { videoId, onEmptyQueue: { watchEndpoint: { videoId } } },
-            queueInsertPosition: position
-          }
-        }
-      };
-      try {
-        item.onTap?.();
-      } finally {
-        setTimeout(() => item.remove(), 1e3);
-      }
+      return true;
+    },
+    /** Play part of a song now. */
+    playPart: (params) => {
+      parts.play(str(params, "videoId"), interval(params));
+      return true;
+    },
+    /** Length, title, cover and best `part`-second window of a song. */
+    songInfo: async (params) => {
+      const videoId = str(params, "videoId");
+      const details = await songDetails(videoId);
+      const best = await bestPart(videoId, details.length, num(params, "part"));
+      return { ...details, best };
+    },
+    /** "Play best parts" / "Shuffle best parts" of a playlist or album. */
+    bestParts: (params) => {
+      parts.playBestParts(
+        str(params, "playlistId"),
+        params.shuffle === true,
+        num(params, "part")
+      ).catch((err) => {
+        parts.task = err instanceof Error ? err.message : String(err);
+        setTimeout(() => {
+          parts.task = void 0;
+        }, 4e3);
+      });
       return true;
     },
     next: () => {
@@ -614,15 +1107,15 @@
       return true;
     },
     pause: () => {
-      api()?.pauseVideo();
+      api2()?.pauseVideo();
       return true;
     },
     resume: () => {
-      api()?.playVideo();
+      api2()?.playVideo();
       return true;
     },
     seek: (params) => {
-      api()?.seekTo(num(params, "seconds"), true);
+      api2()?.seekTo(num(params, "seconds"), true);
       return true;
     }
   };

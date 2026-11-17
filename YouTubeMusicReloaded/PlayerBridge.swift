@@ -105,8 +105,27 @@ final class PlayerBridge: NSObject, ObservableObject {
 
     func play(_ videoId: String) { send("play", ["videoId": videoId]) }
     func playQueueItem(_ index: Int) { send("playQueueItem", ["index": index]) }
-    func enqueue(_ videoId: String, _ position: QueuePosition) {
-        send("enqueue", ["videoId": videoId, "position": position.rawValue])
+    func enqueue(_ videoId: String, _ position: QueuePosition, part: Part? = nil) {
+        send("enqueue", ["videoId": videoId, "position": position.rawValue] + Self.params(part))
+    }
+    /// Play part of a song now.
+    func play(_ videoId: String, part: Part) {
+        send("playPart", ["videoId": videoId] + Self.params(part))
+    }
+    func songInfo(_ videoId: String, bestPartLength: Double) async throws -> SongInfo {
+        try await call(
+            "songInfo", ["videoId": videoId, "part": bestPartLength], as: SongInfo.self)
+    }
+    /// "Play best parts" / "Shuffle best parts" of a playlist or album.
+    func playBestParts(_ playlistId: String, shuffle: Bool, partLength: Double) {
+        send("bestParts", ["playlistId": playlistId, "shuffle": shuffle, "part": partLength])
+    }
+
+    private static func params(_ part: Part?) -> [String: Any] {
+        guard let part else { return [:] }
+        var params: [String: Any] = ["start": part.start]
+        if let end = part.end { params["end"] = end }
+        return params
     }
     func next() { send("next") }
     func previous() { send("previous") }
@@ -200,4 +219,8 @@ private final class WeakMessageHandler: NSObject, WKScriptMessageHandler {
         let body = message.body
         MainActor.assumeIsolated { bridge?.receive(body) }
     }
+}
+
+private func + (lhs: [String: Any], rhs: [String: Any]) -> [String: Any] {
+    lhs.merging(rhs) { _, new in new }
 }

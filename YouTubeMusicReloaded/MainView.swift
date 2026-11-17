@@ -41,6 +41,7 @@ enum Tab: String, CaseIterable, Identifiable {
 /// layout fitted to a phone (the sidebar slides in from ☰).
 struct MainView: View {
     @EnvironmentObject private var bridge: PlayerBridge
+    @EnvironmentObject private var ui: AppUI
     @State private var tab = Tab.home
     @State private var path: [PageSource] = []
     @State private var searching = false
@@ -62,6 +63,9 @@ struct MainView: View {
                             .navigationBarTitleDisplayMode(.inline)
                     }
             }
+            if let task = bridge.state.task {
+                TaskToast(text: task)
+            }
             if bridge.state.videoId != nil {
                 PlayerBar { showPlayer = true }
             }
@@ -70,6 +74,11 @@ struct MainView: View {
         .background(Theme.background.ignoresSafeArea())
         .overlay { sidebar }
         .fullScreenCover(isPresented: $showPlayer) { FullPlayerView() }
+        .sheet(item: $ui.playFrom) { target in
+            PlayFromView(target: target)
+                .environmentObject(bridge)
+        }
+        .sheet(isPresented: $ui.showSettings) { SettingsView() }
     }
 
     // MARK: Top bar
@@ -92,6 +101,11 @@ struct MainView: View {
                     }
                     logo
                     Spacer()
+                    Button { ui.showSettings = true } label: {
+                        Image(systemName: "gearshape")
+                            .font(.system(size: 20))
+                            .frame(width: 44, height: 44)
+                    }
                     Button {
                         searching = true
                         searchFocused = true
@@ -267,5 +281,26 @@ struct Sidebar: View {
                   let page = try? await bridge.page(library) else { return }
             playlists = page.sections.flatMap(\.items).filter { $0.kind == .playlist }
         }
+    }
+}
+
+/// A best-parts run's progress ("Finding best parts… 12/50").
+struct TaskToast: View {
+    let text: String
+
+    var body: some View {
+        HStack(spacing: 10) {
+            ProgressView()
+                .tint(Theme.accent)
+            Text(text)
+                .font(.system(size: 14))
+                .foregroundStyle(Theme.primaryText)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.surface)
+        .overlay(alignment: .top) { Theme.divider.frame(height: 1) }
     }
 }

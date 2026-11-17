@@ -11,6 +11,34 @@ struct PlayerState: Decodable, Equatable {
     var position: Double = 0
     var duration: Double = 0
     var paused = true
+    /// The part of the playing song that plays, if one was chosen.
+    var part: Part?
+    /// What a best-parts run is doing ("Queueing… 3/49"), if one runs.
+    var task: String?
+}
+
+/// Part of a song, in seconds; no `end`: until the song's end.
+struct Part: Codable, Equatable {
+    var start: Double
+    var end: Double?
+}
+
+/// A song's details for "Play from…" (see `songInfo` in `bridge.ts`).
+struct SongInfo: Decodable {
+    let title: String
+    let artist: String
+    let length: Double
+    let thumbnail: String?
+    /// Its best part (from YouTube's "Most replayed"), if it has the data.
+    let best: Part?
+}
+
+/// The song "Play from…" opens for.
+struct PlayFromTarget: Identifiable {
+    let videoId: String
+    let title: String
+    let thumbnail: String?
+    var id: String { videoId }
 }
 
 /// Something on a YouTube Music page: a song, album, playlist, artist…
@@ -37,6 +65,12 @@ struct Item: Decodable, Hashable {
     /// Artists and profiles have round pictures.
     var round: Bool { kind == .artist || kind == .profile }
 
+    /// Songs and videos can be played in part ("Play from…").
+    var playFromTarget: PlayFromTarget? {
+        guard let videoId, kind == .song || kind == .video else { return nil }
+        return PlayFromTarget(videoId: videoId, title: title, thumbnail: thumbnail)
+    }
+
     var playsOnTap: Bool {
         [.song, .video, .episode].contains(kind) && play != nil
     }
@@ -62,6 +96,17 @@ struct PageHeader: Decodable, Hashable {
     let round: Bool
     let play: String?
     let shuffle: String?
+
+    /// The playlist (or album) behind the Play button, for best parts.
+    var playlistId: String? {
+        guard
+            let play, let data = play.data(using: .utf8),
+            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        let endpoint =
+            (json["watchPlaylistEndpoint"] ?? json["watchEndpoint"]) as? [String: Any]
+        return endpoint?["playlistId"] as? String
+    }
 }
 
 /// A filter button ("Songs", "Artists", moods on Home…).
