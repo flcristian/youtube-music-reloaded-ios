@@ -1,0 +1,13 @@
+{
+  "name": "youtube-music-reloaded-ios-web",
+  "private": true,
+  "description": "Script injected into the hidden YouTube Music player (built into ../YouTubeMusicReloaded/Scripts/bridge.js)",
+  "scripts": {
+    "build": "esbuild src/bridge.ts --bundle --format=iife --target=safari17 --outfile=../YouTubeMusicReloaded/Scripts/bridge.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "esbuild": "0.24.0",
+    "typescript": "5.6.3"
+  }
+}
