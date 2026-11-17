@@ -5,7 +5,13 @@
  */
 import { innertube, thumbnailOf } from './innertube';
 import { parsePage } from './pages';
+import { crossfade, type CrossfadeConfig } from './crossfade';
 import { bestPart, parts, songDetails, type Interval } from './parts';
+import { tap } from './tap';
+
+// Before YouTube Music creates its player.
+tap.install();
+crossfade.partEnd = () => parts.current()?.end;
 import { arrangeSearch } from './search';
 
 declare const ytcfg: { get: (key: string) => unknown };
@@ -190,7 +196,7 @@ const methods: Record<string, (params: Params) => unknown> = {
     if (!endpoint.watchEndpoint && !endpoint.watchPlaylistEndpoint) {
       throw new Error('Nothing to play');
     }
-    navigate(endpoint);
+    crossfade.leave(() => navigate(endpoint), 'manual');
     return true;
   },
 
@@ -206,7 +212,8 @@ const methods: Record<string, (params: Params) => unknown> = {
 
   /** Play a song now; YouTube Music fills the queue with its radio. */
   play: (params) => {
-    navigate({ watchEndpoint: { videoId: str(params, 'videoId') } });
+    const videoId = str(params, 'videoId');
+    crossfade.leave(() => navigate({ watchEndpoint: { videoId } }), 'manual');
     return true;
   },
 
@@ -215,9 +222,8 @@ const methods: Record<string, (params: Params) => unknown> = {
     const item = queueItems()[num(params, 'index')];
     const videoId = item?.data?.videoId;
     if (!item || !videoId) throw new Error('That song is no longer queued');
-    navigate({
-      watchEndpoint: item.data?.navigationEndpoint?.watchEndpoint ?? { videoId },
-    });
+    const endpoint = item.data?.navigationEndpoint?.watchEndpoint ?? { videoId };
+    crossfade.leave(() => navigate({ watchEndpoint: endpoint }), 'manual');
     return true;
   },
 
@@ -233,7 +239,10 @@ const methods: Record<string, (params: Params) => unknown> = {
 
   /** Play part of a song now. */
   playPart: (params) => {
-    parts.play(str(params, 'videoId'), interval(params));
+    const videoId = str(params, 'videoId');
+    const part = interval(params);
+    if (api()?.getVideoData()?.video_id === videoId) parts.play(videoId, part);
+    else crossfade.leave(() => parts.play(videoId, part), 'manual');
     return true;
   },
 
@@ -263,13 +272,23 @@ const methods: Record<string, (params: Params) => unknown> = {
   },
 
   next: () => {
-    clickButton('.next-button');
+    crossfade.leave(() => clickButton('.next-button'), 'manual');
     return true;
   },
   previous: () => {
-    clickButton('.previous-button');
+    crossfade.leave(() => clickButton('.previous-button'), 'manual');
     return true;
   },
+
+  /** Crossfade settings from the app. */
+  crossfadeConfig: (params) => {
+    crossfade.config = { ...crossfade.config, ...(params as Partial<CrossfadeConfig>) };
+    return true;
+  },
+  /** The app plays the leaving song's end (crossfade). */
+  fadeOutStarted: (params) => crossfade.outStarted(num(params, 'id')),
+  /** The crossfade is over. */
+  fadeDone: (params) => crossfade.done(num(params, 'id')),
   pause: () => {
     api()?.pauseVideo();
     return true;

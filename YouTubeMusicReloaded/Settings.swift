@@ -5,6 +5,12 @@ import SwiftUI
 enum SettingsKey {
     static let bestPartLength = "bestPartLength"
     static let askOnPlay = "askOnPlay"
+    static let crossfadeEnabled = "crossfadeEnabled"
+    static let crossfadeAuto = "crossfadeAuto"
+    static let crossfadeAutoDuration = "crossfadeAutoDuration"
+    static let crossfadeManual = "crossfadeManual"
+    static let crossfadeManualDuration = "crossfadeManualDuration"
+    static let crossfadeCurve = "crossfadeCurve"
 }
 
 enum SettingsDefault {
@@ -23,6 +29,13 @@ final class AppUI: ObservableObject {
 
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var bridge: PlayerBridge
+    @AppStorage(SettingsKey.crossfadeEnabled) private var crossfadeEnabled = false
+    @AppStorage(SettingsKey.crossfadeAuto) private var crossfadeAuto = true
+    @AppStorage(SettingsKey.crossfadeAutoDuration) private var autoDuration = 5.0
+    @AppStorage(SettingsKey.crossfadeManual) private var crossfadeManual = true
+    @AppStorage(SettingsKey.crossfadeManualDuration) private var manualDuration = 5.0
+    @AppStorage(SettingsKey.crossfadeCurve) private var curve = FadeCurve.equalPower.rawValue
     @AppStorage(SettingsKey.bestPartLength) private var bestPartLength =
         SettingsDefault.bestPartLength
     @AppStorage(SettingsKey.askOnPlay) private var askOnPlay = false
@@ -30,6 +43,37 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    Toggle("Seamless Crossfade", isOn: $crossfadeEnabled)
+                        .tint(Theme.accent)
+                    if crossfadeEnabled {
+                        Toggle("Crossfade at the end of a song", isOn: $crossfadeAuto)
+                            .tint(Theme.accent)
+                        if crossfadeAuto {
+                            seconds("Duration", $autoDuration)
+                        }
+                        Toggle("Crossfade when changing songs manually", isOn: $crossfadeManual)
+                            .tint(Theme.accent)
+                        if crossfadeManual {
+                            seconds("Duration", $manualDuration)
+                        }
+                        Picker("Fade curve", selection: $curve) {
+                            ForEach(FadeCurve.allCases) { curve in
+                                Text(curve.title).tag(curve.rawValue)
+                            }
+                        }
+                    }
+                } footer: {
+                    Text(
+                        "The song you leave keeps playing and fades out while the next one "
+                            + "fades in, from audio that's already downloaded.")
+                }
+                .onChange(of: crossfadeEnabled) { bridge.applyCrossfadeSettings() }
+                .onChange(of: crossfadeAuto) { bridge.applyCrossfadeSettings() }
+                .onChange(of: autoDuration) { bridge.applyCrossfadeSettings() }
+                .onChange(of: crossfadeManual) { bridge.applyCrossfadeSettings() }
+                .onChange(of: manualDuration) { bridge.applyCrossfadeSettings() }
+
                 Section {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
@@ -64,5 +108,20 @@ struct SettingsView: View {
             }
         }
         .preferredColorScheme(.dark)
+    }
+
+    /// A seconds slider (0.5–20 s, as on the desktop).
+    private func seconds(_ title: String, _ value: Binding<Double>) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(title)
+                Spacer()
+                Text(String(format: "%.1f s", value.wrappedValue))
+                    .monospacedDigit()
+                    .foregroundStyle(Theme.secondaryText)
+            }
+            Slider(value: value, in: 0.5...20, step: 0.5)
+                .tint(Theme.accent)
+        }
     }
 }

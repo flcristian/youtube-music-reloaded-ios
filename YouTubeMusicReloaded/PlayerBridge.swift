@@ -1,3 +1,4 @@
+import AVFoundation
 import WebKit
 
 /// The YouTube Music page, running hidden behind the native screens. It does
@@ -23,6 +24,34 @@ final class PlayerBridge: NSObject, ObservableObject {
     @Published private(set) var stateAt = Date()
     /// Whether the YouTube Music page itself is loaded (not sign-in pages).
     @Published private(set) var onMusicPage = false
+    /// Plays both songs of a crossfade natively.
+    private(set) lazy var crossfade: CrossfadeEngine = {
+        let engine = CrossfadeEngine(bridge: self)
+        engine.curve = {
+            FadeCurve(
+                rawValue: UserDefaults.standard.string(forKey: SettingsKey.crossfadeCurve)
+                    ?? "") ?? .equalPower
+        }
+        return engine
+    }()
+
+    /// Send the crossfade settings to the page.
+    func applyCrossfadeSettings() {
+        let defaults = UserDefaults.standard
+        let number = { (key: String, fallback: Double) in
+            defaults.object(forKey: key) as? Double ?? fallback
+        }
+        send(
+            "crossfadeConfig",
+            [
+                "enabled": defaults.bool(forKey: SettingsKey.crossfadeEnabled),
+                "autoEnabled": defaults.object(forKey: SettingsKey.crossfadeAuto) as? Bool ?? true,
+                "autoDuration": number(SettingsKey.crossfadeAutoDuration, 5),
+                "manualEnabled": defaults.object(forKey: SettingsKey.crossfadeManual) as? Bool
+                    ?? true,
+                "manualDuration": number(SettingsKey.crossfadeManualDuration, 5),
+            ])
+    }
 
     override init() {
         let configuration = WKWebViewConfiguration()
@@ -45,6 +74,8 @@ final class PlayerBridge: NSObject, ObservableObject {
         super.init()
         configuration.userContentController.add(
             WeakMessageHandler(self), name: "ytmrState")
+        configuration.userContentController.add(
+            WeakMessageHandler(self), name: "ytmrFade")
         webView.uiDelegate = self
         webView.navigationDelegate = self
         webView.load(URLRequest(url: Self.home))
@@ -153,6 +184,7 @@ final class PlayerBridge: NSObject, ObservableObject {
         try await call("queue", as: [QueueItem].self)
     }
 
+
     // MARK: Page
 
     fileprivate func receive(_ body: Any) {
@@ -161,8 +193,11 @@ final class PlayerBridge: NSObject, ObservableObject {
             let data = text.data(using: .utf8),
             let next = try? JSONDecoder().decode(PlayerState.self, from: data)
         else { return }
+        let becameReady = next.ready && !state.ready
         state = next
         stateAt = Date()
+        // A (re)loaded page starts without the app's settings.
+        if becameReady { applyCrossfadeSettings() }
     }
 
     private static func userScript(_ name: String) -> WKUserScript? {
@@ -217,7 +252,14 @@ private final class WeakMessageHandler: NSObject, WKScriptMessageHandler {
         _ controller: WKUserContentController, didReceive message: WKScriptMessage
     ) {
         let body = message.body
-        MainActor.assumeIsolated { bridge?.receive(body) }
+        let name = message.name
+        MainActor.assumeIsolated {
+            if name == "ytmrFade" {
+                if let text = body as? String { bridge?.crossfade.receive(text) }
+            } else {
+                bridge?.receive(body)
+            }
+        }
     }
 }
 

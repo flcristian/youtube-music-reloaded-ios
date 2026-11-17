@@ -78,7 +78,9 @@ struct MainView: View {
             PlayFromView(target: target)
                 .environmentObject(bridge)
         }
-        .sheet(isPresented: $ui.showSettings) { SettingsView() }
+        .sheet(isPresented: $ui.showSettings) {
+            SettingsView().environmentObject(bridge)
+        }
     }
 
     // MARK: Top bar

@@ -130,25 +130,25 @@
     MUSIC_PAGE_TYPE_NON_MUSIC_AUDIO_TRACK_PAGE: "episode"
   };
   var pageKind = (endpoint2) => {
-    const type = get(
+    const type2 = get(
       endpoint2,
       "browseEndpoint",
       "browseEndpointContextSupportedConfigs",
       "browseEndpointContextMusicConfig",
       "pageType"
     );
-    return typeof type === "string" && pageKinds[type] || "page";
+    return typeof type2 === "string" && pageKinds[type2] || "page";
   };
   var watchKind = (endpoint2) => {
-    const type = get(
+    const type2 = get(
       endpoint2,
       "watchEndpoint",
       "watchEndpointMusicSupportedConfigs",
       "watchEndpointMusicConfig",
       "musicVideoType"
     );
-    if (type === "MUSIC_VIDEO_TYPE_PODCAST_EPISODE") return "episode";
-    return type === "MUSIC_VIDEO_TYPE_ATV" ? "song" : "video";
+    if (type2 === "MUSIC_VIDEO_TYPE_PODCAST_EPISODE") return "episode";
+    return type2 === "MUSIC_VIDEO_TYPE_ATV" ? "song" : "video";
   };
   var endpoint = (node, ...keys) => {
     for (const key of keys) {
@@ -422,6 +422,457 @@
     return page;
   };
 
+  // src/tap.ts
+  var KEEP_BEHIND = 30;
+  var MAX_FRAGMENTS = 400;
+  var type = (data, at) => String.fromCharCode(data[at + 4], data[at + 5], data[at + 6], data[at + 7]);
+  var size = (view, at) => {
+    const small = view.getUint32(at);
+    return small === 1 ? Number(view.getBigUint64(at + 8)) : small || view.byteLength - at;
+  };
+  var boxes = (data, from = 0, to = data.byteLength) => {
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    const found = [];
+    let at = from;
+    while (at + 8 <= to) {
+      const length = size(view, at);
+      if (length < 8) break;
+      found.push({ type: type(data, at), at, size: length });
+      at += length;
+    }
+    return found;
+  };
+  var header2 = (data, at) => new DataView(data.buffer, data.byteOffset, data.byteLength).getUint32(at) === 1 ? 16 : 8;
+  var find = (data, path, from = 0, to = data.byteLength) => {
+    const [name, ...rest] = path;
+    const box = boxes(data, from, to).find((it) => it.type === name);
+    if (!box) return void 0;
+    if (!rest.length) return box;
+    return find(data, rest, box.at + header2(data, box.at), box.at + box.size);
+  };
+  var timescaleOf = (init) => {
+    const mdhd = find(init, ["moov", "trak", "mdia", "mdhd"]);
+    if (!mdhd) return void 0;
+    const view = new DataView(init.buffer, init.byteOffset, init.byteLength);
+    const body = mdhd.at + header2(init, mdhd.at);
+    const version = init[body];
+    return view.getUint32(body + (version === 1 ? 20 : 12));
+  };
+  var decodeTimeOf = (data, moofAt, moofSize) => {
+    const tfdt = find(data, ["traf", "tfdt"], moofAt + header2(data, moofAt), moofAt + moofSize);
+    if (!tfdt) return void 0;
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    const body = tfdt.at + header2(data, tfdt.at);
+    return data[body] === 1 ? Number(view.getBigUint64(body + 4)) : view.getUint32(body + 4);
+  };
+  var RATES = [
+    96e3,
+    88200,
+    64e3,
+    48e3,
+    44100,
+    32e3,
+    24e3,
+    22050,
+    16e3,
+    12e3,
+    11025,
+    8e3
+  ];
+  var toAdts = (init, fragments) => {
+    const mdhd = find(init, ["moov", "trak", "mdia", "mdhd"]);
+    const mp4a = find(init, ["moov", "trak", "mdia", "minf", "stbl", "stsd"]);
+    if (!mdhd || !mp4a) return void 0;
+    const initView = new DataView(init.buffer, init.byteOffset, init.byteLength);
+    const rate = timescaleOf(init) ?? 48e3;
+    const entry = mp4a.at + header2(init, mp4a.at) + 8;
+    const channels = initView.getUint16(entry + 8 + 16) || 2;
+    const rateIndex = Math.max(0, RATES.indexOf(rate));
+    const profile = 1;
+    const frames = [];
+    for (const fragment of fragments) {
+      const data = fragment.data;
+      const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+      const top = boxes(data);
+      for (let b = 0; b < top.length; b++) {
+        const moof = top[b];
+        if (moof.type !== "moof") continue;
+        const mdat = top.slice(b + 1).find((box) => box.type === "mdat");
+        const inside = moof.at + header2(data, moof.at);
+        const traf = find(data, ["traf"], inside, moof.at + moof.size);
+        if (!traf || !mdat) continue;
+        const trafInside = traf.at + header2(data, traf.at);
+        const tfhd = find(data, ["tfhd"], trafInside, traf.at + traf.size);
+        const trun = find(data, ["trun"], trafInside, traf.at + traf.size);
+        if (!tfhd || !trun) continue;
+        let at2 = tfhd.at + 8;
+        const tfhdFlags = view.getUint32(at2) & 16777215;
+        at2 += 8;
+        if (tfhdFlags & 1) at2 += 8;
+        if (tfhdFlags & 2) at2 += 4;
+        if (tfhdFlags & 8) at2 += 4;
+        const defaultSize = tfhdFlags & 16 ? view.getUint32(at2) : 0;
+        at2 = trun.at + 8;
+        const flags = view.getUint32(at2) & 16777215;
+        const count = view.getUint32(at2 + 4);
+        at2 += 8;
+        let offset = mdat.at + header2(data, mdat.at);
+        if (flags & 1) {
+          offset = moof.at + view.getInt32(at2);
+          at2 += 4;
+        }
+        if (flags & 4) at2 += 4;
+        for (let i = 0; i < count; i++) {
+          if (flags & 256) at2 += 4;
+          let size2 = defaultSize;
+          if (flags & 512) {
+            size2 = view.getUint32(at2);
+            at2 += 4;
+          }
+          if (flags & 1024) at2 += 4;
+          if (flags & 2048) at2 += 4;
+          if (!size2 || offset + size2 > data.byteLength) break;
+          const length = size2 + 7;
+          const frame = new Uint8Array(length);
+          frame[0] = 255;
+          frame[1] = 241;
+          frame[2] = profile << 6 | rateIndex << 2 | channels >> 2;
+          frame[3] = (channels & 3) << 6 | length >> 11;
+          frame[4] = length >> 3 & 255;
+          frame[5] = (length & 7) << 5 | 31;
+          frame[6] = 252;
+          frame.set(data.subarray(offset, offset + size2), 7);
+          frames.push(frame);
+          offset += size2;
+        }
+      }
+    }
+    if (!frames.length) return void 0;
+    const out = new Uint8Array(frames.reduce((sum, it) => sum + it.length, 0));
+    let at = 0;
+    for (const frame of frames) {
+      out.set(frame, at);
+      at += frame.length;
+    }
+    return { data: out, seconds: frames.length * 1024 / rate };
+  };
+  var AudioTap = class {
+    tracks = /* @__PURE__ */ new WeakMap();
+    /** The audio track that was appended to last (the playing song). */
+    current;
+    install() {
+      const sources = [
+        window.ManagedMediaSource,
+        window.MediaSource
+      ];
+      for (const Source of new Set(sources)) {
+        if (Source) this.hook(Source);
+      }
+    }
+    hook(Source) {
+      const tap2 = this;
+      const addSourceBuffer = Source.prototype.addSourceBuffer;
+      Source.prototype.addSourceBuffer = function(mime) {
+        const buffer = addSourceBuffer.call(this, mime);
+        if (mime.startsWith("audio/mp4")) {
+          tap2.tracks.set(buffer, { timescale: 0, fragments: [] });
+          const append = buffer.appendBuffer;
+          buffer.appendBuffer = function(data) {
+            try {
+              tap2.add(buffer, data);
+            } catch (err) {
+              console.warn("[ytmr tap]", err);
+            }
+            return append.call(this, data);
+          };
+        }
+        return buffer;
+      };
+    }
+    add(buffer, source) {
+      const track = this.tracks.get(buffer);
+      if (!track) return;
+      let data = source instanceof ArrayBuffer ? new Uint8Array(source) : new Uint8Array(source.buffer, source.byteOffset, source.byteLength);
+      const open = track.open;
+      if (open && open.missing > 0) {
+        const take = Math.min(open.missing, data.byteLength);
+        const merged2 = new Uint8Array(open.fragment.data.byteLength + take);
+        merged2.set(open.fragment.data);
+        merged2.set(data.subarray(0, take), open.fragment.data.byteLength);
+        open.fragment.data = merged2;
+        open.missing -= take;
+        data = data.subarray(take);
+        if (!data.byteLength) return;
+      }
+      const top = boxes(data);
+      const moov = top.find((box) => box.type === "moov");
+      const firstMoof = top.find((box) => box.type === "moof");
+      if (moov) {
+        track.init = data.slice(0, firstMoof ? firstMoof.at : data.byteLength);
+        track.timescale = timescaleOf(track.init) ?? track.timescale;
+      }
+      if (!track.timescale) return;
+      track.open = void 0;
+      for (let i = 0; i < top.length; i++) {
+        const moof = top[i];
+        if (moof.type !== "moof") continue;
+        const mdat = top.slice(i + 1).find((box) => box.type === "mdat");
+        const end = mdat ? mdat.at + mdat.size : moof.at + moof.size;
+        const time = decodeTimeOf(data, moof.at, moof.size);
+        if (time === void 0) continue;
+        const start = time / track.timescale + buffer.timestampOffset;
+        const fragment = {
+          start,
+          data: data.slice(moof.at, Math.min(end, data.byteLength))
+        };
+        track.fragments = track.fragments.filter(
+          (it) => Math.abs(it.start - start) > 1e-3
+        );
+        track.fragments.push(fragment);
+        if (end > data.byteLength) {
+          track.open = { fragment, missing: end - data.byteLength };
+        }
+      }
+      track.fragments.sort((a, b) => a.start - b.start);
+      const now = document.querySelector("video")?.currentTime ?? 0;
+      while (track.fragments.length > MAX_FRAGMENTS || track.fragments.length > 1 && track.fragments[1].start < now - KEEP_BEHIND) {
+        track.fragments.shift();
+      }
+      this.current = track;
+    }
+    /**
+     * The playing song's audio from `from` to `to` (media seconds), as ADTS
+     * (raw AAC frames, each with a small header: a stream any decoder
+     * reads) and the media time it starts at, if that part has been loaded.
+     */
+    window(from, to) {
+      const track = this.current;
+      if (!track?.init) return void 0;
+      const list = track.fragments;
+      let first = -1;
+      for (let i = 0; i < list.length; i++) {
+        if (list[i].start <= from) first = i;
+      }
+      if (first < 0) return void 0;
+      const picked = [list[first]];
+      for (let i = first + 1; i < list.length && list[i].start < to; i++) {
+        picked.push(list[i]);
+      }
+      const adts = toAdts(track.init, picked);
+      if (!adts || picked[0].start + adts.seconds < to - 0.05) return void 0;
+      return { data: adts.data, start: picked[0].start };
+    }
+    /** TEMPORARY: the playing song's fragments, for the log. */
+    describe() {
+      const list = this.current?.fragments ?? [];
+      return `init=${Boolean(this.current?.init)} n=${list.length} ${list.slice(0, 3).map((it) => it.start.toFixed(2)).join(",")}\u2026${list.at(-1)?.start.toFixed(2) ?? ""}`;
+    }
+    /** Whether `from`…`to` of the playing song has been loaded. */
+    has(from, to) {
+      return this.window(from, to) !== void 0;
+    }
+  };
+  var tap = new AudioTap();
+  var base64 = (data) => {
+    let binary = "";
+    for (let i = 0; i < data.length; i += 32768) {
+      binary += String.fromCharCode.apply(
+        null,
+        data.subarray(i, i + 32768)
+      );
+    }
+    return btoa(binary);
+  };
+
+  // src/crossfade.ts
+  var api = () => document.getElementById("movie_player");
+  var video = () => document.querySelector("video");
+  var setMuted = (muted) => {
+    const player = api();
+    if (muted) player?.mute?.();
+    else player?.unMute?.();
+    const media = video();
+    if (media) media.muted = muted;
+  };
+  var post = (message) => window.webkit?.messageHandlers?.ytmrFade?.postMessage(JSON.stringify(message));
+  var log = (text4) => post({ phase: "log", id: 0, text: text4 });
+  var SPARE = 6;
+  var LEAD = 2.5;
+  var START_TIMEOUT = 3e3;
+  var NEXT_TIMEOUT = 8e3;
+  var Crossfade = class {
+    config = {
+      enabled: false,
+      autoEnabled: true,
+      autoDuration: 5,
+      manualEnabled: true,
+      manualDuration: 5
+    };
+    /** A crossfade in progress. */
+    fade;
+    ids = 0;
+    /** Song (and start) the automatic crossfade already ran for. */
+    autoDoneFor;
+    /** Where the playing song (or its chosen part) ends. */
+    partEnd = () => void 0;
+    constructor() {
+      document.addEventListener("timeupdate", this.onTimeUpdate, true);
+    }
+    get busy() {
+      return this.fade !== void 0;
+    }
+    /**
+     * Change the song with a crossfade (if on): `action` runs once the app
+     * plays the leaving song's end.
+     */
+    leave(action, kind, end) {
+      const config = this.config;
+      const on = config.enabled && (kind === "auto" ? config.autoEnabled : config.manualEnabled);
+      const media = video();
+      if (!on || this.fade || !media || media.paused) {
+        action();
+        return;
+      }
+      const duration = kind === "auto" ? config.autoDuration : config.manualDuration;
+      const from = media.currentTime;
+      const to = Math.min(end ?? Infinity, from + duration + SPARE);
+      const audio = tap.window(from, Math.min(to, from + duration));
+      if (!audio) {
+        log(`leave: no audio for ${from.toFixed(1)}`);
+        action();
+        return;
+      }
+      const id = ++this.ids;
+      log(`leave ${kind} at ${from.toFixed(1)} until ${to.toFixed(1)}`);
+      this.fade = {
+        id,
+        duration,
+        from: api()?.getVideoData()?.video_id,
+        action,
+        started: false
+      };
+      const longest = tap.window(from, to) ?? audio;
+      post({
+        phase: "out",
+        id,
+        data: base64(longest.data),
+        start: longest.start,
+        at: media.currentTime,
+        sentAt: Date.now(),
+        until: to,
+        duration
+      });
+      setTimeout(() => {
+        if (this.fade?.id === id && !this.fade.started) this.cancel();
+      }, START_TIMEOUT);
+    }
+    /** The app plays the leaving song: mute the player and move on. */
+    outStarted(id) {
+      const fade = this.fade;
+      if (fade?.id !== id || fade.started) return false;
+      fade.started = true;
+      setMuted(true);
+      log("muted");
+      fade.action();
+      this.waitForNext(fade.id, fade.from, fade.duration).catch(() => this.cancel());
+      return true;
+    }
+    /** The fade is over: the player plays the new song from here on. */
+    done(id) {
+      if (this.fade?.id !== id) return false;
+      this.fade = void 0;
+      setMuted(false);
+      post({ phase: "unmuted", id });
+      setTimeout(() => {
+        if (!this.fade && video()?.muted) {
+          log("still muted after the fade: unmuting again");
+          setMuted(false);
+        }
+      }, 500);
+      return true;
+    }
+    /** Give up: the player plays (unmuted) and the app fades out alone. */
+    cancel() {
+      const fade = this.fade;
+      this.fade = void 0;
+      setMuted(false);
+      if (fade && !fade.started) fade.action();
+      if (fade) post({ phase: "cancel", id: fade.id });
+    }
+    /** Once the next song plays and its start is loaded, hand it over. */
+    async waitForNext(id, from, duration) {
+      const until = performance.now() + NEXT_TIMEOUT;
+      let settledAt;
+      let settledTime = -1;
+      while (performance.now() < until) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        if (this.fade?.id !== id) return;
+        const media = video();
+        const player = api();
+        const videoId = player?.getVideoData()?.video_id;
+        if (!media || !player || !videoId || videoId === from) continue;
+        if (media.paused || media.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) {
+          continue;
+        }
+        if (Math.round(performance.now() / 500) !== this.lastLog) {
+          this.lastLog = Math.round(performance.now() / 500);
+          log(`next ${videoId} t=${media.currentTime.toFixed(2)} ${tap.describe()}`);
+        }
+        const time = media.currentTime;
+        if (Math.abs(time - settledTime) > 1) {
+          settledTime = time;
+          settledAt = performance.now();
+          continue;
+        }
+        settledTime = time;
+        if (performance.now() - (settledAt ?? 0) < 300) continue;
+        const audio = tap.window(time, time + duration + 1);
+        if (!audio) continue;
+        log(`in at ${media.currentTime.toFixed(2)} start ${audio.start.toFixed(2)}`);
+        post({
+          phase: "in",
+          id,
+          data: base64(audio.data),
+          start: audio.start,
+          at: media.currentTime,
+          sentAt: Date.now(),
+          duration
+        });
+        return;
+      }
+      log("next: timed out");
+      this.cancel();
+    }
+    lastLog = 0;
+    /** Automatic crossfade near the end of the song (or of its part). */
+    onTimeUpdate = (event) => {
+      if (!(event.target instanceof HTMLMediaElement)) return;
+      const config = this.config;
+      if (!config.enabled || !config.autoEnabled || this.fade) return;
+      const media = event.target;
+      const player = api();
+      const videoId = player?.getVideoData()?.video_id;
+      if (!player || !videoId || media.paused) return;
+      const duration = player.getDuration();
+      if (!(duration > 0)) return;
+      const shift = media.currentTime - player.getCurrentTime();
+      const end = (this.partEnd() ?? duration) + shift;
+      const remaining = end - media.currentTime;
+      const fade = config.autoDuration;
+      if (remaining > fade + LEAD || remaining < 0.5) return;
+      if (end - shift < fade * 2) return;
+      const key = `${videoId}@${Math.round(end)}`;
+      if (key === this.autoDoneFor) return;
+      this.autoDoneFor = key;
+      this.leave(
+        () => document.querySelector(".next-button")?.click(),
+        "auto",
+        end
+      );
+    };
+  };
+  var crossfade = new Crossfade();
+
   // src/best-part.ts
   var INTRO = 15;
   var STEP = 5;
@@ -511,7 +962,7 @@
   };
 
   // src/parts.ts
-  var api = () => document.getElementById("movie_player");
+  var api2 = () => document.getElementById("movie_player");
   var ENSURE_TIMEOUT = 1e4;
   var SETTLE_TIME = 1e3;
   var nearStart = (time, start) => time >= start - 1.5 && time <= start + 10;
@@ -623,19 +1074,19 @@
     /** What a best-parts run is doing (for the app), if one is running. */
     task;
     constructor() {
-      for (const type of ["loadeddata", "playing", "timeupdate"]) {
-        document.addEventListener(type, this.onProgress, true);
+      for (const type2 of ["loadeddata", "playing", "timeupdate"]) {
+        document.addEventListener(type2, this.onProgress, true);
       }
     }
     /** The playing song's part, if one was chosen. */
     current() {
-      const videoId = api()?.getVideoData()?.video_id;
+      const videoId = api2()?.getVideoData()?.video_id;
       const active = this.active;
       return active && active.videoId === videoId ? { start: active.start, end: active.end } : void 0;
     }
     /** Play `interval` of `videoId` now. */
     play(videoId, interval2) {
-      const player = api();
+      const player = api2();
       if (player?.getVideoData()?.video_id === videoId) {
         this.active = { videoId, ...interval2 };
         player.seekTo(interval2.start, true);
@@ -713,7 +1164,7 @@
         const [first, ...rest] = tracks;
         this.play(first.videoId, parts2.get(first.videoId));
         await waitFor(
-          () => api()?.getVideoData()?.video_id === first.videoId,
+          () => api2()?.getVideoData()?.video_id === first.videoId,
           15e3
         );
         await wait(1e3);
@@ -759,7 +1210,7 @@
       for (const [key, interval2] of this.scheduled) {
         if (ids.has(key)) return { key, interval: interval2 };
       }
-      const title = normalizeTitle(api()?.getVideoData()?.title);
+      const title = normalizeTitle(api2()?.getVideoData()?.title);
       if (title) {
         for (const key of this.bestParts) {
           const interval2 = this.scheduled.get(key);
@@ -780,7 +1231,7 @@
     /** A song started: jump to its part. While it plays: stop at its end. */
     onProgress = (event) => {
       if (!(event.target instanceof HTMLMediaElement)) return;
-      const player = api();
+      const player = api2();
       const videoId = player?.getVideoData()?.video_id;
       if (!player || !videoId) return;
       if (videoId === this.lastVideoId) {
@@ -835,7 +1286,7 @@
           this.cancelEnsure?.();
           return;
         }
-        const player = api();
+        const player = api2();
         const media = document.querySelector("video");
         const playing = media && !media.paused && media.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA;
         if (!player || player.getVideoData()?.video_id !== videoId || !playing) {
@@ -918,13 +1369,15 @@
   };
 
   // src/bridge.ts
-  var api2 = () => document.getElementById("movie_player");
-  var video = () => document.querySelector("video");
+  tap.install();
+  crossfade.partEnd = () => parts.current()?.end;
+  var api3 = () => document.getElementById("movie_player");
+  var video2 = () => document.querySelector("video");
   var text3 = (value) => {
     const node = value;
     return node?.runs?.map((run) => run.text ?? "").join("") ?? node?.simpleText ?? "";
   };
-  var large = (url, size = 544) => url?.replace(/=w\d+-h\d+/, `=w${size}-h${size}`);
+  var large = (url, size2 = 544) => url?.replace(/=w\d+-h\d+/, `=w${size2}-h${size2}`);
   var str = (params, name) => {
     const value = params[name];
     if (typeof value !== "string" || !value) throw new Error(`Missing "${name}"`);
@@ -939,7 +1392,7 @@
     (item) => item.parentElement?.id !== "counterpart-renderer"
   );
   var isCurrent = (item) => {
-    const playing = api2()?.getVideoData()?.video_id;
+    const playing = api3()?.getVideoData()?.video_id;
     const versions = [
       item,
       ...item.closest("ytmusic-playlist-panel-video-wrapper-renderer")?.querySelectorAll(
@@ -975,13 +1428,13 @@
     );
     const src = img?.src;
     if (src && !src.startsWith("data:")) return large(src);
-    const id = api2()?.getVideoData()?.video_id;
+    const id = api3()?.getVideoData()?.video_id;
     return id ? `https://i.ytimg.com/vi/${id}/hqdefault.jpg` : void 0;
   };
   var state = () => {
-    const player = api2();
+    const player = api3();
     const data = player?.getVideoData();
-    const media = video();
+    const media = video2();
     return {
       ready: Boolean(player),
       loggedIn: ytcfg.get("LOGGED_IN") === true,
@@ -1037,7 +1490,7 @@
       if (!endpoint2.watchEndpoint && !endpoint2.watchPlaylistEndpoint) {
         throw new Error("Nothing to play");
       }
-      navigate2(endpoint2);
+      crossfade.leave(() => navigate2(endpoint2), "manual");
       return true;
     },
     queue: () => queueItems().map((item) => ({
@@ -1050,7 +1503,8 @@
     })),
     /** Play a song now; YouTube Music fills the queue with its radio. */
     play: (params) => {
-      navigate2({ watchEndpoint: { videoId: str(params, "videoId") } });
+      const videoId = str(params, "videoId");
+      crossfade.leave(() => navigate2({ watchEndpoint: { videoId } }), "manual");
       return true;
     },
     /** Jump to a song that's already in the queue. */
@@ -1058,9 +1512,8 @@
       const item = queueItems()[num(params, "index")];
       const videoId = item?.data?.videoId;
       if (!item || !videoId) throw new Error("That song is no longer queued");
-      navigate2({
-        watchEndpoint: item.data?.navigationEndpoint?.watchEndpoint ?? { videoId }
-      });
+      const endpoint2 = item.data?.navigationEndpoint?.watchEndpoint ?? { videoId };
+      crossfade.leave(() => navigate2({ watchEndpoint: endpoint2 }), "manual");
       return true;
     },
     /** "Play next" / "Add to queue" (optionally only a part of the song). */
@@ -1074,7 +1527,10 @@
     },
     /** Play part of a song now. */
     playPart: (params) => {
-      parts.play(str(params, "videoId"), interval(params));
+      const videoId = str(params, "videoId");
+      const part = interval(params);
+      if (api3()?.getVideoData()?.video_id === videoId) parts.play(videoId, part);
+      else crossfade.leave(() => parts.play(videoId, part), "manual");
       return true;
     },
     /** Length, title, cover and best `part`-second window of a song. */
@@ -1099,23 +1555,32 @@
       return true;
     },
     next: () => {
-      clickButton(".next-button");
+      crossfade.leave(() => clickButton(".next-button"), "manual");
       return true;
     },
     previous: () => {
-      clickButton(".previous-button");
+      crossfade.leave(() => clickButton(".previous-button"), "manual");
       return true;
     },
+    /** Crossfade settings from the app. */
+    crossfadeConfig: (params) => {
+      crossfade.config = { ...crossfade.config, ...params };
+      return true;
+    },
+    /** The app plays the leaving song's end (crossfade). */
+    fadeOutStarted: (params) => crossfade.outStarted(num(params, "id")),
+    /** The crossfade is over. */
+    fadeDone: (params) => crossfade.done(num(params, "id")),
     pause: () => {
-      api2()?.pauseVideo();
+      api3()?.pauseVideo();
       return true;
     },
     resume: () => {
-      api2()?.playVideo();
+      api3()?.playVideo();
       return true;
     },
     seek: (params) => {
-      api2()?.seekTo(num(params, "seconds"), true);
+      api3()?.seekTo(num(params, "seconds"), true);
       return true;
     }
   };
@@ -1131,7 +1596,7 @@
     lastAt = now;
     handler()?.postMessage(JSON.stringify(current));
   };
-  for (const type of [
+  for (const type2 of [
     "play",
     "pause",
     "playing",
@@ -1141,7 +1606,7 @@
     "durationchange",
     "timeupdate"
   ]) {
-    document.addEventListener(type, () => send(type !== "timeupdate"), true);
+    document.addEventListener(type2, () => send(type2 !== "timeupdate"), true);
   }
   setInterval(() => send(), 1e3);
   window.__ytmr = {
