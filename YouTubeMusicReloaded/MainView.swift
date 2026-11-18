@@ -66,6 +66,9 @@ struct MainView: View {
             if let task = bridge.state.task {
                 TaskToast(text: task)
             }
+            if let toast = ui.toast, !showPlayer {
+                MessageToast(text: toast)
+            }
             if bridge.state.videoId != nil {
                 PlayerBar { showPlayer = true }
             }
@@ -73,10 +76,19 @@ struct MainView: View {
         }
         .background(Theme.background.ignoresSafeArea())
         .overlay { sidebar }
-        .fullScreenCover(isPresented: $showPlayer) { FullPlayerView() }
+        .fullScreenCover(isPresented: $showPlayer) {
+            FullPlayerView().environmentObject(bridge).environmentObject(ui)
+                .environmentObject(bridge.waveforms)
+        }
         .sheet(item: $ui.playFrom) { target in
             PlayFromView(target: target)
                 .environmentObject(bridge)
+        }
+        // The full player presents its own (a sheet can't open under it).
+        .sheet(item: showPlayer ? .constant(nil) : $ui.addToPlaylist) { song in
+            AddToPlaylistView(song: song)
+                .environmentObject(bridge)
+                .environmentObject(ui)
         }
         .sheet(isPresented: $ui.showSettings) {
             SettingsView().environmentObject(bridge)

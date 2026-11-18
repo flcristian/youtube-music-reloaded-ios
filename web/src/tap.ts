@@ -14,6 +14,9 @@ interface Fragment {
 interface Track {
   /** `ftyp` + `moov`: needed in front of any fragments. */
   init?: Uint8Array;
+  /** The song it belongs to (and its length), for the waveform. */
+  videoId?: string;
+  duration?: number;
   timescale: number;
   fragments: Fragment[];
   /** The fragment whose last piece hasn't been appended yet. */
@@ -173,6 +176,31 @@ const toAdts = (init: Uint8Array, fragments: Fragment[]) => {
   return { data: out, seconds: (frames.length * 1024) / rate };
 };
 
+interface PlayerApi {
+  getVideoData(): { video_id?: string } | undefined;
+  getDuration(): number;
+}
+const player = () =>
+  document.getElementById('movie_player') as (HTMLElement & PlayerApi) | null;
+
+type Handler = { postMessage(message: unknown): void };
+/** A loaded stretch of a song's audio, for the app's waveform. */
+const postWave = (track: Track, fragment: Fragment) => {
+  if (!track.init || !track.videoId || !track.duration) return;
+  const adts = toAdts(track.init, [fragment]);
+  if (!adts) return;
+  (
+    window as unknown as { webkit?: { messageHandlers?: { ytmrWave?: Handler } } }
+  ).webkit?.messageHandlers?.ytmrWave?.postMessage(
+    JSON.stringify({
+      videoId: track.videoId,
+      duration: track.duration,
+      start: fragment.start,
+      data: base64(adts.data),
+    }),
+  );
+};
+
 class AudioTap {
   private readonly tracks = new WeakMap<SourceBuffer, Track>();
   /** The audio track that was appended to last (the playing song). */
@@ -226,6 +254,7 @@ class AudioTap {
       merged.set(data.subarray(0, take), open.fragment.data.byteLength);
       open.fragment.data = merged;
       open.missing -= take;
+      if (open.missing === 0) postWave(track, open.fragment);
       data = data.subarray(take);
       if (!data.byteLength) return;
     }
@@ -235,6 +264,15 @@ class AudioTap {
     if (moov) {
       track.init = data.slice(0, firstMoof ? firstMoof.at : data.byteLength);
       track.timescale = timescaleOf(track.init) ?? track.timescale;
+    }
+    // The song it belongs to: whatever the player has once it plays it.
+    if (!track.videoId || !track.duration) {
+      const id = player()?.getVideoData()?.video_id;
+      const length = player()?.getDuration() ?? 0;
+      if (id && length > 0) {
+        track.videoId = id;
+        track.duration = length;
+      }
     }
     if (!track.timescale) return;
     track.open = undefined;
@@ -257,6 +295,8 @@ class AudioTap {
       track.fragments.push(fragment);
       if (end > data.byteLength) {
         track.open = { fragment, missing: end - data.byteLength };
+      } else if (mdat) {
+        postWave(track, fragment);
       }
     }
     track.fragments.sort((a, b) => a.start - b.start);

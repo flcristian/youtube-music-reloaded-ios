@@ -112,6 +112,8 @@ class Crossfade {
 
   /** Where the playing song (or its chosen part) ends. */
   partEnd: () => number | undefined = () => undefined;
+  /** Where the playing song's chosen part starts, if it has one. */
+  partStart: () => number | undefined = () => undefined;
 
   constructor() {
     document.addEventListener('timeupdate', this.onTimeUpdate, true);
@@ -141,9 +143,17 @@ class Crossfade {
    * the song it has), and the player gets its sound back for resuming.
    */
   pauseRequested() {
+    this.interrupt('paused');
+  }
+
+  /**
+   * Drop a fade in progress (pause, seek): the app's songs stop, and the
+   * player plays (or stays paused) with its sound.
+   */
+  interrupt(why = 'interrupted') {
     if (!this.fade && !this.unmuting) return;
     const fade = this.fade;
-    log(`paused mid-fade (fade ${fade?.id ?? '-'})`);
+    log(`${why} mid-fade (fade ${fade?.id ?? '-'})`);
     this.fade = undefined;
     this.aborts++;
     this.unmuting = false;
@@ -311,6 +321,12 @@ class Crossfade {
       }
       settledTime = time;
       if (performance.now() - (settledAt ?? 0) < 300) continue;
+      // A part (best parts, Play from…): only once it plays from there.
+      const start = this.partStart();
+      const songTime = player.getCurrentTime();
+      if (start !== undefined && start >= 1 && (songTime < start - 1.5 || songTime > start + 10)) {
+        continue;
+      }
       const audio = tap.window(time, time + duration + 1);
       if (!audio) continue;
       log(`in at ${media.currentTime.toFixed(2)} start ${audio.start.toFixed(2)}`);

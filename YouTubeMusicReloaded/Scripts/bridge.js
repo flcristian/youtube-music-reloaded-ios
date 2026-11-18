@@ -484,10 +484,10 @@
     const mp4a = find(init, ["moov", "trak", "mdia", "minf", "stbl", "stsd"]);
     if (!mdhd || !mp4a) return void 0;
     const initView = new DataView(init.buffer, init.byteOffset, init.byteLength);
-    const rate = timescaleOf(init) ?? 48e3;
+    const rate2 = timescaleOf(init) ?? 48e3;
     const entry = mp4a.at + header2(init, mp4a.at) + 8;
     const channels = initView.getUint16(entry + 8 + 16) || 2;
-    const rateIndex = Math.max(0, RATES.indexOf(rate));
+    const rateIndex = Math.max(0, RATES.indexOf(rate2));
     const profile = 1;
     const frames = [];
     for (const fragment of fragments) {
@@ -554,7 +554,21 @@
       out.set(frame, at);
       at += frame.length;
     }
-    return { data: out, seconds: frames.length * 1024 / rate };
+    return { data: out, seconds: frames.length * 1024 / rate2 };
+  };
+  var player = () => document.getElementById("movie_player");
+  var postWave = (track, fragment) => {
+    if (!track.init || !track.videoId || !track.duration) return;
+    const adts = toAdts(track.init, [fragment]);
+    if (!adts) return;
+    window.webkit?.messageHandlers?.ytmrWave?.postMessage(
+      JSON.stringify({
+        videoId: track.videoId,
+        duration: track.duration,
+        start: fragment.start,
+        data: base64(adts.data)
+      })
+    );
   };
   var AudioTap = class {
     tracks = /* @__PURE__ */ new WeakMap();
@@ -601,6 +615,7 @@
         merged2.set(data.subarray(0, take), open.fragment.data.byteLength);
         open.fragment.data = merged2;
         open.missing -= take;
+        if (open.missing === 0) postWave(track, open.fragment);
         data = data.subarray(take);
         if (!data.byteLength) return;
       }
@@ -610,6 +625,14 @@
       if (moov) {
         track.init = data.slice(0, firstMoof ? firstMoof.at : data.byteLength);
         track.timescale = timescaleOf(track.init) ?? track.timescale;
+      }
+      if (!track.videoId || !track.duration) {
+        const id = player()?.getVideoData()?.video_id;
+        const length = player()?.getDuration() ?? 0;
+        if (id && length > 0) {
+          track.videoId = id;
+          track.duration = length;
+        }
       }
       if (!track.timescale) return;
       track.open = void 0;
@@ -631,6 +654,8 @@
         track.fragments.push(fragment);
         if (end > data.byteLength) {
           track.open = { fragment, missing: end - data.byteLength };
+        } else if (mdat) {
+          postWave(track, fragment);
         }
       }
       track.fragments.sort((a, b) => a.start - b.start);
@@ -688,14 +713,14 @@
   var api = () => document.getElementById("movie_player");
   var video = () => document.querySelector("video");
   var setMuted = (muted) => {
-    const player = api();
-    if (muted) player?.mute?.();
-    else player?.unMute?.();
+    const player2 = api();
+    if (muted) player2?.mute?.();
+    else player2?.unMute?.();
     const media = video();
     if (media) media.muted = muted;
   };
   var post = (message) => window.webkit?.messageHandlers?.ytmrFade?.postMessage(JSON.stringify(message));
-  var log = (text4) => post({ phase: "log", id: 0, text: text4 });
+  var log = (text5) => post({ phase: "log", id: 0, text: text5 });
   var SPARE = 6;
   var LEAD = 2.5;
   var START_TIMEOUT = 3e3;
@@ -738,6 +763,8 @@
     autoDoneFor;
     /** Where the playing song (or its chosen part) ends. */
     partEnd = () => void 0;
+    /** Where the playing song's chosen part starts, if it has one. */
+    partStart = () => void 0;
     constructor() {
       document.addEventListener("timeupdate", this.onTimeUpdate, true);
       document.addEventListener("pause", this.onPause, true);
@@ -764,9 +791,16 @@
      * the song it has), and the player gets its sound back for resuming.
      */
     pauseRequested() {
+      this.interrupt("paused");
+    }
+    /**
+     * Drop a fade in progress (pause, seek): the app's songs stop, and the
+     * player plays (or stays paused) with its sound.
+     */
+    interrupt(why = "interrupted") {
       if (!this.fade && !this.unmuting) return;
       const fade = this.fade;
-      log(`paused mid-fade (fade ${fade?.id ?? "-"})`);
+      log(`${why} mid-fade (fade ${fade?.id ?? "-"})`);
       this.fade = void 0;
       this.aborts++;
       this.unmuting = false;
@@ -900,9 +934,9 @@
         await new Promise((resolve) => setTimeout(resolve, 50));
         if (this.fade?.id !== id) return;
         const media = video();
-        const player = api();
-        const videoId = player?.getVideoData()?.video_id;
-        if (!media || !player || !videoId || videoId === from) continue;
+        const player2 = api();
+        const videoId = player2?.getVideoData()?.video_id;
+        if (!media || !player2 || !videoId || videoId === from) continue;
         if (media.paused || media.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) {
           continue;
         }
@@ -918,6 +952,11 @@
         }
         settledTime = time;
         if (performance.now() - (settledAt ?? 0) < 300) continue;
+        const start = this.partStart();
+        const songTime = player2.getCurrentTime();
+        if (start !== void 0 && start >= 1 && (songTime < start - 1.5 || songTime > start + 10)) {
+          continue;
+        }
         const audio = tap.window(time, time + duration + 1);
         if (!audio) continue;
         log(`in at ${media.currentTime.toFixed(2)} start ${audio.start.toFixed(2)}`);
@@ -942,12 +981,12 @@
       const config = this.config;
       if (!config.enabled || !config.autoEnabled || this.fade) return;
       const media = event.target;
-      const player = api();
-      const videoId = player?.getVideoData()?.video_id;
-      if (!player || !videoId || media.paused) return;
-      const duration = player.getDuration();
+      const player2 = api();
+      const videoId = player2?.getVideoData()?.video_id;
+      if (!player2 || !videoId || media.paused) return;
+      const duration = player2.getDuration();
       if (!(duration > 0)) return;
-      const shift = media.currentTime - player.getCurrentTime();
+      const shift = media.currentTime - player2.getCurrentTime();
       const end = (this.partEnd() ?? duration) + shift;
       const remaining = end - media.currentTime;
       const fade = config.autoDuration;
@@ -1097,6 +1136,42 @@
     ) ?? item
   );
   var queueLength = () => document.querySelectorAll("ytmusic-player-queue-item").length;
+  var queueElement = () => document.querySelector("#queue");
+  var queueState = () => queueElement()?.queue?.store?.store?.getState().queue;
+  var isSelected = (item) => {
+    const wrapper = item.playlistPanelVideoWrapperRenderer;
+    const video3 = item.playlistPanelVideoRenderer ?? wrapper?.primaryRenderer?.playlistPanelVideoRenderer;
+    return video3?.selected === true;
+  };
+  var replaceUpNext = async (videoIds) => {
+    const queue = queueElement();
+    const state2 = queueState();
+    if (!queue?.dispatch || !state2?.items) return false;
+    const json = await innertube("music/get_queue", {
+      queueContextParams: state2.queueContextParams,
+      videoIds
+    });
+    const items2 = (json.queueDatas ?? []).map((data) => data.content).filter(Boolean);
+    if (!items2.length) return false;
+    const now = queueState();
+    const all = now?.items ?? [];
+    const current = all.findIndex(isSelected);
+    if (current < 0) return false;
+    for (let i = all.length - 1; i > current; i--) {
+      queue.dispatch({ type: "REMOVE_ITEM", payload: i });
+    }
+    queue.dispatch({
+      type: "ADD_ITEMS",
+      payload: {
+        nextQueueItemId: queueState()?.nextQueueItemId,
+        index: current + 1,
+        items: items2,
+        shuffleEnabled: false,
+        shouldAssignIds: true
+      }
+    });
+    return true;
+  };
   var navigate = (endpoint2) => {
     document.querySelector("ytmusic-app")?.dispatchEvent(
       new CustomEvent("yt-navigate", {
@@ -1149,6 +1224,30 @@
     }
     return tracks;
   };
+  var runsText = (value) => {
+    const node = value;
+    return node?.runs?.map((run) => run.text ?? "").join("") ?? node?.simpleText ?? "";
+  };
+  var radioTracks = async (target) => {
+    const json = await innertube(
+      "next",
+      target.videoId ? { videoId: target.videoId, playlistId: `RDAMVM${target.videoId}` } : { playlistId: `RDAMPL${target.playlistId}` }
+    );
+    return findAll(json, "playlistPanelVideoRenderer").flatMap((raw) => {
+      const item = raw;
+      if (typeof item.videoId !== "string") return [];
+      return [
+        {
+          videoId: item.videoId,
+          title: runsText(item.title),
+          subtitle: runsText(item.shortBylineText),
+          duration: runsText(item.lengthText) || void 0,
+          thumbnail: thumbnailOf(item.thumbnail)
+        }
+      ];
+    });
+  };
+  var sourceTracks = (source) => "radio" in source ? radioTracks(source.radio) : playlistTracks(source.playlistId);
   var Parts = class {
     /** Queued songs and the part of them to play. */
     scheduled = /* @__PURE__ */ new Map();
@@ -1170,6 +1269,19 @@
         document.addEventListener(type2, this.onProgress, true);
       }
     }
+    /**
+     * Move where the playing song stops (`undefined`: at its end), as
+     * dragging the line at the part's end on the waveform does.
+     */
+    setPartEnd(end) {
+      const videoId = api2()?.getVideoData()?.video_id;
+      if (!videoId) return;
+      if (this.active?.videoId === videoId) {
+        this.active = { ...this.active, end };
+      } else if (end !== void 0) {
+        this.active = { videoId, start: 0, end };
+      }
+    }
     /** The playing song's part, if one was chosen. */
     current() {
       const videoId = api2()?.getVideoData()?.video_id;
@@ -1178,10 +1290,10 @@
     }
     /** Play `interval` of `videoId` now. */
     play(videoId, interval2) {
-      const player = api2();
-      if (player?.getVideoData()?.video_id === videoId) {
+      const player2 = api2();
+      if (player2?.getVideoData()?.video_id === videoId) {
         this.active = { videoId, ...interval2 };
-        player.seekTo(interval2.start, true);
+        player2.seekTo(interval2.start, true);
         return;
       }
       this.playNow = { interval: interval2, key: videoId, at: performance.now() };
@@ -1190,6 +1302,30 @@
       });
     }
     /** "Play next" / "Add to queue", playing only `interval` when it's up. */
+    /** Queue a whole playlist or album, next or at the end. */
+    enqueuePlaylist(playlistId, position) {
+      const item = document.createElement(
+        "ytmusic-menu-service-item-renderer"
+      );
+      item.hidden = true;
+      document.body.append(item);
+      item.data = {
+        serviceEndpoint: {
+          queueAddEndpoint: {
+            queueTarget: {
+              playlistId,
+              onEmptyQueue: { watchPlaylistEndpoint: { playlistId } }
+            },
+            queueInsertPosition: position
+          }
+        }
+      };
+      try {
+        item.onTap?.();
+      } finally {
+        setTimeout(() => item.remove(), 1e3);
+      }
+    }
     enqueue(videoId, interval2, position) {
       const item = document.createElement(
         "ytmusic-menu-service-item-renderer"
@@ -1216,12 +1352,12 @@
       }
     }
     /** Play up to 50 songs of a playlist, each only for its best part. */
-    async playBestParts(playlistId, shuffle, part) {
+    async playBestParts(source, shuffle, part) {
       const run = ++this.run;
       const stale = () => run !== this.run;
       this.task = "Loading songs\u2026";
       try {
-        const all = await playlistTracks(playlistId);
+        const all = await sourceTracks(source);
         if (stale()) return;
         const unique = [
           ...new Map(all.map((track) => [track.videoId, track])).values()
@@ -1260,6 +1396,12 @@
           15e3
         );
         await wait(1e3);
+        if (stale() || !rest.length) return;
+        this.task = "Queueing\u2026";
+        const replaced = await replaceUpNext(
+          rest.map((track) => track.videoId)
+        ).catch(() => false);
+        if (replaced || stale()) return;
         let queued = 0;
         for (const track of [...rest].reverse()) {
           if (stale()) return;
@@ -1323,14 +1465,14 @@
     /** A song started: jump to its part. While it plays: stop at its end. */
     onProgress = (event) => {
       if (!(event.target instanceof HTMLMediaElement)) return;
-      const player = api2();
-      const videoId = player?.getVideoData()?.video_id;
-      if (!player || !videoId) return;
+      const player2 = api2();
+      const videoId = player2?.getVideoData()?.video_id;
+      if (!player2 || !videoId) return;
       if (videoId === this.lastVideoId) {
-        this.checkEnd(player, videoId, event.target);
+        this.checkEnd(player2, videoId, event.target);
         return;
       }
-      if (!(player.getDuration() > 0)) return;
+      if (!(player2.getDuration() > 0)) return;
       this.lastVideoId = videoId;
       let found;
       const playNow = this.playNow;
@@ -1356,10 +1498,10 @@
       }
     };
     /** At the chosen end, move on to the next song. */
-    checkEnd(player, videoId, media) {
+    checkEnd(player2, videoId, media) {
       const end = this.active?.videoId === videoId ? this.active.end : void 0;
       if (end === void 0 || media.paused) return;
-      const time = player.getCurrentTime();
+      const time = player2.getCurrentTime();
       if (time < end || time > end + 2) return;
       this.active = void 0;
       document.querySelector(".next-button")?.click();
@@ -1378,14 +1520,14 @@
           this.cancelEnsure?.();
           return;
         }
-        const player = api2();
+        const player2 = api2();
         const media = document.querySelector("video");
         const playing = media && !media.paused && media.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA;
-        if (!player || player.getVideoData()?.video_id !== videoId || !playing) {
+        if (!player2 || player2.getVideoData()?.video_id !== videoId || !playing) {
           return;
         }
-        if (!nearStart(player.getCurrentTime(), start)) {
-          player.seekTo(start, true);
+        if (!nearStart(player2.getCurrentTime(), start)) {
+          player2.seekTo(start, true);
           settledSince = void 0;
         } else {
           settledSince ??= now;
@@ -1399,6 +1541,76 @@
     }
   };
   var parts = new Parts();
+
+  // src/library.ts
+  var text3 = (value) => {
+    const node = value;
+    return node?.runs?.map((run) => run.text ?? "").join("") ?? node?.simpleText ?? "";
+  };
+  var watchNext = (videoId) => innertube("next", { videoId });
+  var likeStatus = async (videoId) => {
+    const json = await watchNext(videoId);
+    const status = findAll(json, "likeStatus").find(
+      (value) => typeof value === "string"
+    );
+    return status ?? "INDIFFERENT";
+  };
+  var rate = async (videoId, like) => {
+    await innertube(like ? "like/like" : "like/removelike", { target: { videoId } });
+    return true;
+  };
+  var playlistsFor = async (videoId) => {
+    const json = await innertube("playlist/get_add_to_playlist", { videoIds: [videoId] });
+    return findAll(json, "playlistAddToOptionRenderer").flatMap((raw) => {
+      const option = raw;
+      const playlistId = option.playlistId;
+      if (typeof playlistId !== "string") return [];
+      return [
+        {
+          playlistId,
+          title: text3(option.title),
+          contains: option.containsSelectedVideos === "ALL"
+        }
+      ];
+    });
+  };
+  var addToPlaylist = async (playlistId, videoId) => {
+    await innertube("browse/edit_playlist", {
+      playlistId,
+      actions: [
+        { action: "ACTION_ADD_VIDEO", addedVideoId: videoId, dedupeOption: "DEDUPE_OPTION_SKIP" }
+      ]
+    });
+    return true;
+  };
+  var createPlaylist = async (title, videoId) => {
+    const json = await innertube("playlist/create", {
+      title,
+      privacyStatus: "PRIVATE",
+      videoIds: [videoId]
+    });
+    return typeof json.playlistId === "string" ? json.playlistId : "";
+  };
+  var saveSong = async (videoId, save) => {
+    const json = await watchNext(videoId);
+    for (const raw of findAll(json, "toggleMenuServiceItemRenderer")) {
+      const toggle = raw;
+      const icon = toggle.defaultIcon?.iconType;
+      if (icon !== "LIBRARY_ADD" && icon !== "LIBRARY_SAVED") continue;
+      const saved = icon === "LIBRARY_SAVED";
+      if (saved === save) return true;
+      const token = findAll(toggle.defaultServiceEndpoint, "feedbackToken")[0];
+      if (typeof token !== "string") break;
+      await innertube("feedback", { feedbackTokens: [token] });
+      return true;
+    }
+    throw new Error("This song cannot be saved to the library");
+  };
+  var savePlaylist = async (playlistId, save) => {
+    await innertube(save ? "like/like" : "like/removelike", { target: { playlistId } });
+    return true;
+  };
+  var radioEndpoint = (target) => target.videoId ? { watchEndpoint: { videoId: target.videoId, playlistId: `RDAMVM${target.videoId}` } } : { watchPlaylistEndpoint: { playlistId: `RDAMPL${target.playlistId}` } };
 
   // src/search.ts
   var FILTERS = [
@@ -1485,9 +1697,10 @@
     }
   };
   crossfade.partEnd = () => parts.current()?.end;
+  crossfade.partStart = () => parts.current()?.start;
   var api3 = () => document.getElementById("movie_player");
   var video2 = () => document.querySelector("video");
-  var text3 = (value) => {
+  var text4 = (value) => {
     const node = value;
     return node?.runs?.map((run) => run.text ?? "").join("") ?? node?.simpleText ?? "";
   };
@@ -1501,6 +1714,10 @@
     const value = params[name];
     if (typeof value !== "number") throw new Error(`Missing "${name}"`);
     return value;
+  };
+  var likeOf = (data) => {
+    const status = findAll(data, "likeStatus").find((it) => typeof it === "string");
+    return status === void 0 ? null : status === "LIKE";
   };
   var queueItems = () => [...document.querySelectorAll("ytmusic-player-queue-item")].filter(
     (item) => item.parentElement?.id !== "counterpart-renderer"
@@ -1546,18 +1763,18 @@
     return id ? `https://i.ytimg.com/vi/${id}/hqdefault.jpg` : void 0;
   };
   var state = () => {
-    const player = api3();
-    const data = player?.getVideoData();
+    const player2 = api3();
+    const data = player2?.getVideoData();
     const media = video2();
     return {
-      ready: Boolean(player),
+      ready: Boolean(player2),
       loggedIn: ytcfg.get("LOGGED_IN") === true,
       videoId: data?.video_id || void 0,
       title: data?.title || void 0,
       artist: data?.author || void 0,
       cover: data?.video_id ? currentCover() : void 0,
-      position: player?.getCurrentTime() ?? 0,
-      duration: player?.getDuration() ?? 0,
+      position: player2?.getCurrentTime() ?? 0,
+      duration: player2?.getDuration() ?? 0,
       // Mid-fade the app plays the sound while the player switches songs.
       paused: (media?.paused ?? true) && !crossfade.busy,
       part: parts.current(),
@@ -1610,11 +1827,13 @@
     },
     queue: () => queueItems().map((item) => ({
       videoId: item.data?.videoId ?? "",
-      title: text3(item.data?.title),
-      artist: text3(item.data?.shortBylineText),
-      duration: text3(item.data?.lengthText) || void 0,
+      title: text4(item.data?.title),
+      artist: text4(item.data?.shortBylineText),
+      duration: text4(item.data?.lengthText) || void 0,
       thumbnail: thumbnailOf(item.data?.thumbnail),
-      current: isCurrent(item)
+      current: isCurrent(item),
+      // The queue row's own like status, if it carries one.
+      liked: likeOf(item.data)
     })),
     /** Play a song now; YouTube Music fills the queue with its radio. */
     play: (params) => {
@@ -1657,8 +1876,9 @@
     },
     /** "Play best parts" / "Shuffle best parts" of a playlist or album. */
     bestParts: (params) => {
+      const radio = params.radio;
       parts.playBestParts(
-        str(params, "playlistId"),
+        radio ? { radio } : { playlistId: str(params, "playlistId") },
         params.shuffle === true,
         num(params, "part")
       ).catch((err) => {
@@ -1686,6 +1906,49 @@
     fadeOutStarted: (params) => crossfade.outStarted(num(params, "id")),
     /** The crossfade is over. */
     fadeDone: (params) => crossfade.done(num(params, "id")),
+    /** Whether a song is liked: LIKE, DISLIKE or INDIFFERENT. */
+    likeStatus: (params) => likeStatus(str(params, "videoId")),
+    /** Like (`like: true`) or un-like a song. */
+    rate: (params) => rate(str(params, "videoId"), params.like === true),
+    /** The user's playlists, for "Add to playlist". */
+    playlistsFor: (params) => playlistsFor(str(params, "videoId")),
+    addToPlaylist: (params) => addToPlaylist(str(params, "playlistId"), str(params, "videoId")),
+    createPlaylist: (params) => createPlaylist(str(params, "title"), str(params, "videoId")),
+    /** Save a song (`videoId`) or a playlist / album (`playlistId`). */
+    saveToLibrary: (params) => typeof params.videoId === "string" ? saveSong(params.videoId, params.save !== false) : savePlaylist(str(params, "playlistId"), params.save !== false),
+    /** Start a song's or a playlist's radio. */
+    radio: (params) => {
+      const endpoint2 = radioEndpoint({
+        videoId: typeof params.videoId === "string" ? params.videoId : void 0,
+        playlistId: typeof params.playlistId === "string" ? params.playlistId : void 0
+      });
+      crossfade.leave(() => navigate2(endpoint2), "manual");
+      return true;
+    },
+    /** Where the playing song stops (no `end`: at its end). */
+    setPartEnd: (params) => {
+      parts.setPartEnd(typeof params.end === "number" ? params.end : void 0);
+      send();
+      return true;
+    },
+    /** "Play next" for a playlist or album. */
+    enqueuePlaylist: (params) => {
+      parts.enqueuePlaylist(
+        str(params, "playlistId"),
+        params.position === "end" ? "INSERT_AT_END" : "INSERT_AFTER_CURRENT_VIDEO"
+      );
+      return true;
+    },
+    /** Move a queued song from one place to another. */
+    moveQueueItem: (params) => {
+      const queue = document.querySelector("#queue");
+      if (!queue?.dispatch) throw new Error("The queue is not ready yet");
+      queue.dispatch({
+        type: "MOVE_ITEM",
+        payload: { fromIndex: num(params, "from"), toIndex: num(params, "to") }
+      });
+      return true;
+    },
     pause: () => {
       crossfade.pauseRequested();
       api3()?.pauseVideo();
@@ -1696,6 +1959,7 @@
       return true;
     },
     seek: (params) => {
+      crossfade.interrupt();
       api3()?.seekTo(num(params, "seconds"), true);
       return true;
     }

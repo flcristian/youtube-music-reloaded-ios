@@ -3,11 +3,21 @@
  * `window.__ytmr.call(method, params)` (returns JSON text) and receives the
  * player state through the `ytmrState` message handler.
  */
-import { innertube, thumbnailOf } from './innertube';
+import { findAll, innertube, thumbnailOf } from './innertube';
 import { parsePage } from './pages';
 import { crossfade, type CrossfadeConfig } from './crossfade';
 import { bestPart, parts, songDetails, type Interval } from './parts';
 import { tap } from './tap';
+import {
+  addToPlaylist,
+  createPlaylist,
+  likeStatus,
+  playlistsFor,
+  radioEndpoint,
+  rate,
+  savePlaylist,
+  saveSong,
+} from './library';
 
 // Before YouTube Music creates its player.
 tap.install();
@@ -40,6 +50,7 @@ const lockScreenButtons = () => {
   }
 };
 crossfade.partEnd = () => parts.current()?.end;
+crossfade.partStart = () => parts.current()?.start;
 import { arrangeSearch } from './search';
 
 declare const ytcfg: { get: (key: string) => unknown };
@@ -72,6 +83,11 @@ type QueueElement = HTMLElement & {
 
 type Params = Record<string, unknown>;
 
+/** The queue panel, which takes the actions its own drag & drop sends. */
+type QueueStoreElement = HTMLElement & {
+  dispatch?: (action: { type: string; payload?: unknown }) => void;
+};
+
 const api = () =>
   document.getElementById('movie_player') as (HTMLElement & PlayerApi) | null;
 const video = () => document.querySelector('video');
@@ -98,6 +114,12 @@ const num = (params: Params, name: string) => {
   const value = params[name];
   if (typeof value !== 'number') throw new Error(`Missing "${name}"`);
   return value;
+};
+
+/** LIKE → true, INDIFFERENT / DISLIKE → false, unknown → null. */
+const likeOf = (data: unknown) => {
+  const status = findAll(data, 'likeStatus').find((it) => typeof it === 'string');
+  return status === undefined ? null : status === 'LIKE';
 };
 
 /** Queue rows, without the "video version" twins some rows hold. */
@@ -237,6 +259,8 @@ const methods: Record<string, (params: Params) => unknown> = {
       duration: text(item.data?.lengthText) || undefined,
       thumbnail: thumbnailOf(item.data?.thumbnail),
       current: isCurrent(item),
+      // The queue row's own like status, if it carries one.
+      liked: likeOf(item.data),
     })),
 
   /** Play a song now; YouTube Music fills the queue with its radio. */
@@ -285,9 +309,10 @@ const methods: Record<string, (params: Params) => unknown> = {
 
   /** "Play best parts" / "Shuffle best parts" of a playlist or album. */
   bestParts: (params) => {
+    const radio = params.radio as { videoId?: string; playlistId?: string } | undefined;
     parts
       .playBestParts(
-        str(params, 'playlistId'),
+        radio ? { radio } : { playlistId: str(params, 'playlistId') },
         params.shuffle === true,
         num(params, 'part'),
       )
@@ -318,6 +343,55 @@ const methods: Record<string, (params: Params) => unknown> = {
   fadeOutStarted: (params) => crossfade.outStarted(num(params, 'id')),
   /** The crossfade is over. */
   fadeDone: (params) => crossfade.done(num(params, 'id')),
+  /** Whether a song is liked: LIKE, DISLIKE or INDIFFERENT. */
+  likeStatus: (params) => likeStatus(str(params, 'videoId')),
+  /** Like (`like: true`) or un-like a song. */
+  rate: (params) => rate(str(params, 'videoId'), params.like === true),
+  /** The user's playlists, for "Add to playlist". */
+  playlistsFor: (params) => playlistsFor(str(params, 'videoId')),
+  addToPlaylist: (params) =>
+    addToPlaylist(str(params, 'playlistId'), str(params, 'videoId')),
+  createPlaylist: (params) =>
+    createPlaylist(str(params, 'title'), str(params, 'videoId')),
+  /** Save a song (`videoId`) or a playlist / album (`playlistId`). */
+  saveToLibrary: (params) =>
+    typeof params.videoId === 'string'
+      ? saveSong(params.videoId, params.save !== false)
+      : savePlaylist(str(params, 'playlistId'), params.save !== false),
+  /** Start a song's or a playlist's radio. */
+  radio: (params) => {
+    const endpoint = radioEndpoint({
+      videoId: typeof params.videoId === 'string' ? params.videoId : undefined,
+      playlistId: typeof params.playlistId === 'string' ? params.playlistId : undefined,
+    });
+    crossfade.leave(() => navigate(endpoint), 'manual');
+    return true;
+  },
+  /** Where the playing song stops (no `end`: at its end). */
+  setPartEnd: (params) => {
+    parts.setPartEnd(typeof params.end === 'number' ? params.end : undefined);
+    send();
+    return true;
+  },
+  /** "Play next" for a playlist or album. */
+  enqueuePlaylist: (params) => {
+    parts.enqueuePlaylist(
+      str(params, 'playlistId'),
+      params.position === 'end' ? 'INSERT_AT_END' : 'INSERT_AFTER_CURRENT_VIDEO',
+    );
+    return true;
+  },
+  /** Move a queued song from one place to another. */
+  moveQueueItem: (params) => {
+    const queue = document.querySelector<QueueStoreElement>('#queue');
+    if (!queue?.dispatch) throw new Error('The queue is not ready yet');
+    queue.dispatch({
+      type: 'MOVE_ITEM',
+      payload: { fromIndex: num(params, 'from'), toIndex: num(params, 'to') },
+    });
+    return true;
+  },
+
   pause: () => {
     crossfade.pauseRequested();
     api()?.pauseVideo();
@@ -328,6 +402,8 @@ const methods: Record<string, (params: Params) => unknown> = {
     return true;
   },
   seek: (params) => {
+    // Mid-fade the app plays the sound: drop the fade, so the jump is heard.
+    crossfade.interrupt();
     api()?.seekTo(num(params, 'seconds'), true);
     return true;
   },

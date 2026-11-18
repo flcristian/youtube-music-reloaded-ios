@@ -4,7 +4,14 @@
  * part's end the player just moves on to the next song.
  */
 import { bestPartStart, loadReplayGraph } from './best-part';
-import { innertube, parseContinuation, parseTracks, type Track } from './innertube';
+import {
+  findAll,
+  innertube,
+  parseContinuation,
+  parseTracks,
+  thumbnailOf,
+  type Track,
+} from './innertube';
 
 /** Part of a song to play, in song seconds; no `end`: until the end. */
 export interface Interval {
@@ -88,6 +95,74 @@ const queueEntries = () =>
 const queueLength = () =>
   document.querySelectorAll('ytmusic-player-queue-item').length;
 
+/** The player's queue: its store and the actions its own UI sends. */
+type QueueElement = HTMLElement & {
+  dispatch?: (action: { type: string; payload?: unknown }) => void;
+  queue?: {
+    store?: {
+      store?: {
+        getState(): {
+          queue?: {
+            items?: Record<string, unknown>[];
+            nextQueueItemId?: unknown;
+            queueContextParams?: string;
+          };
+        };
+      };
+    };
+  };
+};
+const queueElement = () => document.querySelector<QueueElement>('#queue');
+const queueState = () => queueElement()?.queue?.store?.store?.getState().queue;
+
+const isSelected = (item: Record<string, unknown>) => {
+  const wrapper = item.playlistPanelVideoWrapperRenderer as
+    | { primaryRenderer?: { playlistPanelVideoRenderer?: { selected?: boolean } } }
+    | undefined;
+  const video = (item.playlistPanelVideoRenderer ??
+    wrapper?.primaryRenderer?.playlistPanelVideoRenderer) as
+    | { selected?: boolean }
+    | undefined;
+  return video?.selected === true;
+};
+
+/**
+ * Make the queue the playing song followed by `videoIds` only (the
+ * player's own suggestions after it are dropped), in one go. False if
+ * the queue can't be changed this way.
+ */
+const replaceUpNext = async (videoIds: string[]) => {
+  const queue = queueElement();
+  const state = queueState();
+  if (!queue?.dispatch || !state?.items) return false;
+  const json = await innertube('music/get_queue', {
+    queueContextParams: state.queueContextParams,
+    videoIds,
+  });
+  const items = ((json.queueDatas as { content?: unknown }[] | undefined) ?? [])
+    .map((data) => data.content)
+    .filter(Boolean);
+  if (!items.length) return false;
+  const now = queueState();
+  const all = now?.items ?? [];
+  const current = all.findIndex(isSelected);
+  if (current < 0) return false;
+  for (let i = all.length - 1; i > current; i--) {
+    queue.dispatch({ type: 'REMOVE_ITEM', payload: i });
+  }
+  queue.dispatch({
+    type: 'ADD_ITEMS',
+    payload: {
+      nextQueueItemId: queueState()?.nextQueueItemId,
+      index: current + 1,
+      items,
+      shuffleEnabled: false,
+      shouldAssignIds: true,
+    },
+  });
+  return true;
+};
+
 const navigate = (endpoint: Record<string, unknown>) => {
   document.querySelector('ytmusic-app')?.dispatchEvent(
     new CustomEvent('yt-navigate', {
@@ -162,6 +237,43 @@ const playlistTracks = async (playlistId: string) => {
   return tracks;
 };
 
+const runsText = (value: unknown) => {
+  const node = value as { runs?: { text?: string }[]; simpleText?: string } | undefined;
+  return node?.runs?.map((run) => run.text ?? '').join('') ?? node?.simpleText ?? '';
+};
+
+/** Where a best-parts run takes its songs from. */
+export type Source =
+  | { playlistId: string }
+  /** A song's or a playlist's radio. */
+  | { radio: { videoId?: string; playlistId?: string } };
+
+/** The songs of a radio, as the player's queue would get them. */
+const radioTracks = async (target: { videoId?: string; playlistId?: string }) => {
+  const json = await innertube(
+    'next',
+    target.videoId
+      ? { videoId: target.videoId, playlistId: `RDAMVM${target.videoId}` }
+      : { playlistId: `RDAMPL${target.playlistId}` },
+  );
+  return findAll(json, 'playlistPanelVideoRenderer').flatMap((raw): Track[] => {
+    const item = raw as Record<string, unknown>;
+    if (typeof item.videoId !== 'string') return [];
+    return [
+      {
+        videoId: item.videoId,
+        title: runsText(item.title),
+        subtitle: runsText(item.shortBylineText),
+        duration: runsText(item.lengthText) || undefined,
+        thumbnail: thumbnailOf(item.thumbnail),
+      },
+    ];
+  });
+};
+
+const sourceTracks = (source: Source) =>
+  'radio' in source ? radioTracks(source.radio) : playlistTracks(source.playlistId);
+
 class Parts {
   /** Queued songs and the part of them to play. */
   private readonly scheduled = new Map<string, Interval>();
@@ -182,6 +294,20 @@ class Parts {
   constructor() {
     for (const type of ['loadeddata', 'playing', 'timeupdate']) {
       document.addEventListener(type, this.onProgress, true);
+    }
+  }
+
+  /**
+   * Move where the playing song stops (`undefined`: at its end), as
+   * dragging the line at the part's end on the waveform does.
+   */
+  setPartEnd(end: number | undefined) {
+    const videoId = api()?.getVideoData()?.video_id;
+    if (!videoId) return;
+    if (this.active?.videoId === videoId) {
+      this.active = { ...this.active, end };
+    } else if (end !== undefined) {
+      this.active = { videoId, start: 0, end };
     }
   }
 
@@ -209,6 +335,31 @@ class Parts {
   }
 
   /** "Play next" / "Add to queue", playing only `interval` when it's up. */
+  /** Queue a whole playlist or album, next or at the end. */
+  enqueuePlaylist(playlistId: string, position: InsertPosition) {
+    const item = document.createElement(
+      'ytmusic-menu-service-item-renderer',
+    ) as HTMLElement & { data?: unknown; onTap?: () => void };
+    item.hidden = true;
+    document.body.append(item);
+    item.data = {
+      serviceEndpoint: {
+        queueAddEndpoint: {
+          queueTarget: {
+            playlistId,
+            onEmptyQueue: { watchPlaylistEndpoint: { playlistId } },
+          },
+          queueInsertPosition: position,
+        },
+      },
+    };
+    try {
+      item.onTap?.();
+    } finally {
+      setTimeout(() => item.remove(), 1000);
+    }
+  }
+
   enqueue(videoId: string, interval: Interval, position: InsertPosition) {
     const item = document.createElement(
       'ytmusic-menu-service-item-renderer',
@@ -236,12 +387,12 @@ class Parts {
   }
 
   /** Play up to 50 songs of a playlist, each only for its best part. */
-  async playBestParts(playlistId: string, shuffle: boolean, part: number) {
+  async playBestParts(source: Source, shuffle: boolean, part: number) {
     const run = ++this.run;
     const stale = () => run !== this.run;
     this.task = 'Loading songs…';
     try {
-      const all = await playlistTracks(playlistId);
+      const all = await sourceTracks(source);
       if (stale()) return;
       const unique = [
         ...new Map(all.map((track) => [track.videoId, track])).values(),
@@ -284,6 +435,14 @@ class Parts {
         15_000,
       );
       await wait(1000);
+      if (stale() || !rest.length) return;
+      this.task = 'Queueing…';
+      // All at once, in place of the player's suggestions (one at a time,
+      // a part could end mid-way and suggestions would play in between).
+      const replaced = await replaceUpNext(
+        rest.map((track) => track.videoId),
+      ).catch(() => false);
+      if (replaced || stale()) return;
       let queued = 0;
       for (const track of [...rest].reverse()) {
         if (stale()) return;

@@ -71,6 +71,18 @@ struct Item: Decodable, Hashable {
         return PlayFromTarget(videoId: videoId, title: title, thumbnail: thumbnail)
     }
 
+    /// Songs and videos: what the like / library / playlist actions take.
+    var song: SongTarget? {
+        guard let videoId, kind == .song || kind == .video else { return nil }
+        return SongTarget(videoId: videoId, title: title)
+    }
+
+    /// Albums and playlists: the playlist behind their Play button.
+    var playlistId: String? {
+        guard kind == .album || kind == .playlist else { return nil }
+        return playlistIdOf(play)
+    }
+
     var playsOnTap: Bool {
         [.song, .video, .episode].contains(kind) && play != nil
     }
@@ -98,15 +110,7 @@ struct PageHeader: Decodable, Hashable {
     let shuffle: String?
 
     /// The playlist (or album) behind the Play button, for best parts.
-    var playlistId: String? {
-        guard
-            let play, let data = play.data(using: .utf8),
-            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return nil }
-        let endpoint =
-            (json["watchPlaylistEndpoint"] ?? json["watchEndpoint"]) as? [String: Any]
-        return endpoint?["playlistId"] as? String
-    }
+    var playlistId: String? { playlistIdOf(play) }
 }
 
 /// A filter button ("Songs", "Artists", moods on Home…).
@@ -133,10 +137,22 @@ struct QueueItem: Decodable, Hashable {
     let duration: String?
     let thumbnail: String?
     let current: Bool
+    /// Liked, if the queue row says (nil: ask YouTube Music).
+    let liked: Bool?
 }
 
 enum QueuePosition: String {
     case next, end
+}
+
+/// The playlist a "play" endpoint (JSON text) plays.
+func playlistIdOf(_ play: String?) -> String? {
+    guard
+        let play, let data = play.data(using: .utf8),
+        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    else { return nil }
+    let endpoint = (json["watchPlaylistEndpoint"] ?? json["watchEndpoint"]) as? [String: Any]
+    return endpoint?["playlistId"] as? String
 }
 
 /// "3:07" for 187 seconds.

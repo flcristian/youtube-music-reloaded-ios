@@ -193,6 +193,14 @@ struct HeaderView: View {
                             .frame(width: 38, height: 38)
                             .background(Theme.field, in: Circle())
                     }
+                    Menu {
+                        PlaylistActions(playlistId: playlistId)
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 16, weight: .semibold))
+                            .frame(width: 38, height: 38)
+                            .background(Theme.field, in: Circle())
+                    }
                 }
             }
         }
@@ -344,6 +352,8 @@ struct ItemRow: View {
         .padding(.vertical, 6)
         .contentShape(Rectangle())
         .onTapGesture { activate(item, bridge: bridge, ui: ui, open: open) }
+        // Hold: the same menu as ⋮.
+        .contextMenu { ItemActions(item: item, open: open) }
     }
 }
 
@@ -356,28 +366,7 @@ struct ItemMenu: View {
 
     var body: some View {
         Menu {
-            if let videoId = item.videoId {
-                Button { bridge.enqueue(videoId, .next) } label: {
-                    Label("Play next", systemImage: "text.line.first.and.arrowtriangle.forward")
-                }
-                Button { bridge.enqueue(videoId, .end) } label: {
-                    Label("Add to queue", systemImage: "text.badge.plus")
-                }
-                if let target = item.playFromTarget {
-                    Button { ui.playFrom = target } label: {
-                        Label("Play from…", systemImage: "play.square")
-                    }
-                }
-            } else if let play = item.play {
-                Button { bridge.playEndpoint(play) } label: {
-                    Label("Play", systemImage: "play.fill")
-                }
-            }
-            if !item.playsOnTap, let endpoint = item.open {
-                Button { open(endpoint) } label: {
-                    Label("Open", systemImage: "arrow.right")
-                }
-            }
+            ItemActions(item: item, open: open)
         } label: {
             Image(systemName: "ellipsis")
                 .rotationEffect(.degrees(90))
@@ -422,25 +411,7 @@ struct ItemCard: View {
         .frame(maxWidth: width == nil ? .infinity : nil, alignment: .leading)
         .contentShape(Rectangle())
         .onTapGesture { activate(item, bridge: bridge, ui: ui, open: open) }
-        .contextMenu {
-            if let videoId = item.videoId {
-                Button { bridge.enqueue(videoId, .next) } label: {
-                    Label("Play next", systemImage: "text.line.first.and.arrowtriangle.forward")
-                }
-                Button { bridge.enqueue(videoId, .end) } label: {
-                    Label("Add to queue", systemImage: "text.badge.plus")
-                }
-                if let target = item.playFromTarget {
-                    Button { ui.playFrom = target } label: {
-                        Label("Play from…", systemImage: "play.square")
-                    }
-                }
-            } else if let play = item.play {
-                Button { bridge.playEndpoint(play) } label: {
-                    Label("Play", systemImage: "play.fill")
-                }
-            }
-        }
+        .contextMenu { ItemActions(item: item, open: open) }
     }
 }
 

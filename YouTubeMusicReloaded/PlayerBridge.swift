@@ -22,7 +22,17 @@ final class PlayerBridge: NSObject, ObservableObject {
     /// Latest player state, and when it was reported (to move the position
     /// along between reports).
     @Published private(set) var state = PlayerState()
-    @Published private(set) var stateAt = Date()
+    /// Waveforms of the songs, from the audio the page loads.
+    let waveforms = WaveformStore()
+    private(set) var stateAt = Date()
+    /// The latest reported position, kept without publishing: the page
+    /// reports it every second, and redrawing every screen that often
+    /// makes open menus flicker. Views that show it refresh on a timer.
+    private var livePosition = 0.0
+    private var liveAt = Date()
+    /// A seek just sent: reports from before it lands are ignored (they'd
+    /// put the slider back where it was).
+    private var seekTarget: (seconds: Double, at: Date)?
     /// Whether the YouTube Music page itself is loaded (not sign-in pages).
     @Published private(set) var onMusicPage = false
     /// Plays both songs of a crossfade natively.
@@ -80,6 +90,8 @@ final class PlayerBridge: NSObject, ObservableObject {
             WeakMessageHandler(self), name: "ytmrState")
         configuration.userContentController.add(
             WeakMessageHandler(self), name: "ytmrFade")
+        configuration.userContentController.add(
+            WeakMessageHandler(self), name: "ytmrWave")
         // Set up the crossfade's audio now, before anything plays: creating
         // it sets up the audio output, which makes the player drop out for
         // a moment if it's playing (the first skip used to pause).
@@ -101,8 +113,8 @@ final class PlayerBridge: NSObject, ObservableObject {
 
     /// The position right now, counting time since the last report.
     func position(at date: Date = Date()) -> Double {
-        guard !state.paused else { return state.position }
-        let moved = state.position + date.timeIntervalSince(stateAt)
+        guard !state.paused else { return livePosition }
+        let moved = livePosition + date.timeIntervalSince(liveAt)
         return state.duration > 0 ? min(moved, state.duration) : moved
     }
 
@@ -184,7 +196,18 @@ final class PlayerBridge: NSObject, ObservableObject {
     func seek(to seconds: Double) {
         state.position = seconds
         stateAt = Date()
+        livePosition = seconds
+        liveAt = stateAt
+        seekTarget = (seconds, stateAt)
         send("seek", ["seconds": seconds])
+    }
+
+    /// Where the playing song stops (nil: at its end).
+    func setPartEnd(_ end: Double?) {
+        state.part = Part(start: state.part?.start ?? 0, end: end)
+        var params: [String: Any] = [:]
+        if let end { params["end"] = end }
+        send("setPartEnd", params)
     }
 
     func playEndpoint(_ endpoint: String) { send("playEndpoint", ["endpoint": endpoint]) }
@@ -209,11 +232,28 @@ final class PlayerBridge: NSObject, ObservableObject {
         guard
             let text = body as? String,
             let data = text.data(using: .utf8),
-            let next = try? JSONDecoder().decode(PlayerState.self, from: data)
+            let reported = try? JSONDecoder().decode(PlayerState.self, from: data)
         else { return }
-        let becameReady = next.ready && !state.ready
+        let becameReady = reported.ready && !state.ready
+        var next = reported
+        if let target = seekTarget {
+            let elapsed = Date().timeIntervalSince(target.at)
+            if elapsed > 3 || abs(next.position - (target.seconds + elapsed)) < 2 {
+                seekTarget = nil
+            } else {
+                // Not there yet: keep showing where it's going.
+                next.position = position()
+            }
+        }
+        let expected = position()
+        livePosition = next.position
+        liveAt = Date()
+        // Only the position moved on (as expected): don't publish.
+        var same = next
+        same.position = state.position
+        if same == state, abs(next.position - expected) < 1.5 { return }
         state = next
-        stateAt = Date()
+        stateAt = liveAt
         // A (re)loaded page starts without the app's settings.
         if becameReady { applyCrossfadeSettings() }
     }
@@ -274,6 +314,8 @@ private final class WeakMessageHandler: NSObject, WKScriptMessageHandler {
         MainActor.assumeIsolated {
             if name == "ytmrFade" {
                 if let text = body as? String { bridge?.crossfade.receive(text) }
+            } else if name == "ytmrWave" {
+                if let text = body as? String { bridge?.waveforms.receive(text) }
             } else {
                 bridge?.receive(body)
             }

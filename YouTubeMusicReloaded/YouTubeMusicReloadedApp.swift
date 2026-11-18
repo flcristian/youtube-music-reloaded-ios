@@ -15,6 +15,7 @@ struct YouTubeMusicReloadedApp: App {
             RootView()
                 .environmentObject(bridge)
                 .environmentObject(ui)
+                .environmentObject(bridge.waveforms)
                 .preferredColorScheme(.dark)
                 .tint(Theme.primaryText)
                 .onAppear {

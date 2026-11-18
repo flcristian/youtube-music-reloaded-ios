@@ -25,6 +25,10 @@ let partLengthRange = 30.0...300.0
 final class AppUI: ObservableObject {
     @Published var playFrom: PlayFromTarget?
     @Published var showSettings = false
+    /// "Add to playlist" is open for this song.
+    @Published var addToPlaylist: SongTarget?
+    /// A short message above the player bar ("Added to Liked songs").
+    @Published var toast: String?
 }
 
 struct SettingsView: View {
